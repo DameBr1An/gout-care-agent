@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.streamlit/
+.venv/
+.vscode/
+tests_tmp/
+data/
+reports/
