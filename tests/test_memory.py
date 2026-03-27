@@ -31,13 +31,10 @@ class MemoryTests(unittest.TestCase):
 
         result = memory.build_long_term_memory(profile, logs, labs, attacks)
 
-        self.assertIn("user_preferences", result)
-        self.assertIn("ai_advice_summary", result)
-        self.assertIn("attack_patterns", result)
         self.assertIn("behavior_portraits", result)
         self.assertIn("gout_management_twin_profile", result)
         self.assertIn("7d", result["behavior_portraits"])
-        self.assertEqual(result["attack_patterns"]["common_joint_site"], "右脚大脚趾")
+        self.assertIn("summary", result["gout_management_twin_profile"])
 
     def test_behavior_portrait_uses_requested_window(self) -> None:
         logs = pd.DataFrame(

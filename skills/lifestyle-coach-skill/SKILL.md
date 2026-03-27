@@ -1,7 +1,7 @@
 ﻿---
 name: lifestyle-coach-skill
 description: 根据风险、诱因和近期行为，给出饮食、饮水、运动和日常管理建议。
-module: src/gout_agent/skills/lifestyle.py
+module: skills/lifestyle-coach-skill/runtime.py
 recommended_tools:
   - 计算痛风风险
   - 识别痛风诱因

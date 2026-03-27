@@ -1,26 +1,24 @@
-# Skill 定义目录
+# Skills 目录说明
 
-这个目录保存了项目中 6 个轻量 Skill 的正式 `SKILL.md` 定义。
+这个目录保存项目中每个 Skill 的两部分内容：
 
-每个 Skill 都采用同样的结构：
+- `SKILL.md`：定义 Skill 的职责、适用场景、推荐工具和执行步骤
+- `runtime.py`：实现该 Skill 的运行时代码
 
-- 一个目录
-- 一个 `SKILL.md`
-- frontmatter 元数据
-- 使用时机
-- 执行步骤
-- 输出要求
+当前目录结构以“一个 Skill 一个目录”为准，例如：
 
-当前 Skill 包括：
+- `intake-skill/`
+- `risk-assessment-skill/`
+- `lifestyle-coach-skill/`
+- `medication-followup-skill/`
+- `report-explanation-skill/`
+- `lab-report-skill/`
 
-- `orchestrator-skill`
-- `intake-skill`
-- `risk-assessment-skill`
-- `lifestyle-coach-skill`
-- `medication-followup-skill`
-- `report-explanation-skill`
+其中：
 
-这些 `SKILL.md` 是给大模型 / Agent 运行时读取的行为说明书。
-当前真正可执行的 Python Skill 模块位于：
+- `orchestrator-skill/` 和 `profile-skill/` 目前只保留 `SKILL.md`，用于路由和能力定义
+- 业务运行时代码统一从本目录加载，不再通过 `src/gout_agent/skills/` 中的旧兼容入口转发
 
-- `src/gout_agent/skills/`
+运行时加载关系：
+
+`SKILL.md -> skill_registry -> orchestrator -> skills/*/runtime.py`

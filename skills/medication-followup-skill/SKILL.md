@@ -1,7 +1,7 @@
 ﻿---
 name: medication-followup-skill
 description: 管理药物、用药提醒、依从性和复查随访信息。
-module: src/gout_agent/skills/medication.py
+module: skills/medication-followup-skill/runtime.py
 recommended_tools:
   - 获取药物列表
   - 获取服药依从性

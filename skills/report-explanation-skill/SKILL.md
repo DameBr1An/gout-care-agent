@@ -1,7 +1,7 @@
 ﻿---
 name: report-explanation-skill
 description: 用通俗中文解释周报或月报，突出趋势、风险重点和下一步行动。
-module: src/gout_agent/skills/reporting_skill.py
+module: skills/report-explanation-skill/runtime.py
 recommended_tools:
   - 生成周报
   - 生成月报

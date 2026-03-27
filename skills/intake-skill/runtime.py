@@ -32,10 +32,10 @@ def parse_free_text_entry(text: str) -> dict:
     if weight_match:
         payload["weight_kg"] = float(weight_match.group(1))
 
-    pain_match = re.search(r"疼(?:痛)?\s*(\d+)", text)
+    pain_match = re.search(r"(疼痛|痛感|疼)\s*(\d+)", text)
     if pain_match:
-        payload["pain_score"] = int(pain_match.group(1))
-        payload["joint_pain_flag"] = int(pain_match.group(1)) > 0
+        payload["pain_score"] = int(pain_match.group(2))
+        payload["joint_pain_flag"] = int(pain_match.group(2)) > 0
 
     if "啤酒" in text or "beer" in normalized:
         payload["alcohol_intake"] = "beer"
@@ -46,7 +46,7 @@ def parse_free_text_entry(text: str) -> dict:
     elif "喝酒" in text or "饮酒" in text:
         payload["alcohol_intake"] = "other"
 
-    if "痛" in text or "肿" in text or "红" in text:
+    if any(keyword in text for keyword in ("疼", "肿", "红", "关节")):
         payload["symptom_notes"] = text.strip()
         payload["joint_pain_flag"] = True
 

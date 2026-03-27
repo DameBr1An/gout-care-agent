@@ -209,20 +209,20 @@ def _example(description: str, args: list[Any] | None = None, kwargs: dict[str, 
     return ToolExampleSpec(description=description, args=args or [], kwargs=kwargs or {})
 
 
-def build_default_tool_registry(project_root: Path) -> ToolRegistry:
+def build_default_tool_registry(project_root: Path, user_id: int = data.DEFAULT_USER_ID) -> ToolRegistry:
     registry = ToolRegistry()
 
     registry.register(
         "获取用户档案",
         "读取当前用户的基础档案和健康档案。",
-        lambda: data.get_user_profile(project_root),
+        lambda: data.get_user_profile(project_root, user_id=user_id),
         returns=_returns("object", "用户基础档案和健康档案。"),
         examples=[_example("读取默认用户档案")],
     )
     registry.register(
         "更新用户档案",
         "更新当前用户的基础档案和健康档案。",
-        lambda payload: data.update_user_profile(project_root, payload),
+        lambda payload: data.update_user_profile(project_root, payload, user_id=user_id),
         parameters=[_param("payload", "object", "要更新的档案字段。")],
         returns=_returns("object", "更新后的用户档案。"),
         examples=[_example("更新目标尿酸", kwargs={"payload": {"target_uric_acid": 360}})],
@@ -230,7 +230,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "记录日常健康",
         "写入一条每日健康记录。",
-        lambda payload: data.log_daily_health_entry(project_root, payload),
+        lambda payload: data.log_daily_health_entry(project_root, payload, user_id=user_id),
         parameters=[_param("payload", "object", "每日记录内容。")],
         returns=_returns("integer", "新建记录 ID。"),
         examples=[_example("记录今日饮水和疼痛评分", kwargs={"payload": {"log_date": "2026-03-21", "water_ml": 1800, "pain_score": 2}})],
@@ -238,15 +238,31 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取近期健康记录",
         "读取最近一段时间的每日健康记录。",
-        lambda days=30: data.get_recent_health_entries(project_root, days=days),
+        lambda days=30: data.get_recent_health_entries(project_root, days=days, user_id=user_id),
         parameters=[_param("days", "integer", "向前查询的天数。", required=False, default=30)],
         returns=_returns("array<object>", "每日健康记录列表。"),
         examples=[_example("读取最近 7 天记录", kwargs={"days": 7})],
     )
     registry.register(
+        "记录部位症状",
+        "写入一条身体部位症状记录。",
+        lambda payload: data.log_joint_symptom(project_root, payload, user_id=user_id),
+        parameters=[_param("payload", "object", "部位、疼痛、红肿等症状内容。")],
+        returns=_returns("integer", "新建部位症状记录 ID。"),
+        examples=[_example("记录右脚大脚趾疼痛", kwargs={"payload": {"log_date": "2026-03-21", "body_site": "右脚大脚趾", "pain_score": 5}})],
+    )
+    registry.register(
+        "获取部位症状历史",
+        "读取最近一段时间的身体部位症状记录。",
+        lambda days=90: data.get_recent_joint_symptoms(project_root, days=days, user_id=user_id),
+        parameters=[_param("days", "integer", "向前查询的天数。", required=False, default=90)],
+        returns=_returns("array<object>", "部位症状记录列表。"),
+        examples=[_example("读取最近 30 天部位症状", kwargs={"days": 30})],
+    )
+    registry.register(
         "记录化验结果",
         "写入一条化验结果。",
-        lambda payload: data.log_lab_result(project_root, payload),
+        lambda payload: data.log_lab_result(project_root, payload, user_id=user_id),
         parameters=[_param("payload", "object", "化验结果内容。")],
         returns=_returns("integer", "新建化验记录 ID。"),
         examples=[_example("记录尿酸结果", kwargs={"payload": {"test_date": "2026-03-21", "uric_acid": 510}})],
@@ -254,7 +270,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取化验历史",
         "读取化验历史。",
-        lambda metric_name=None: data.get_lab_history(project_root, metric_name=metric_name),
+        lambda metric_name=None: data.get_lab_history(project_root, metric_name=metric_name, user_id=user_id),
         parameters=[_param("metric_name", "string", "可选，按单个指标过滤。", required=False, default=None)],
         returns=_returns("array<object>", "化验历史列表。"),
         examples=[_example("读取全部化验历史")],
@@ -262,7 +278,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "记录痛风发作",
         "写入一条痛风发作记录。",
-        lambda payload: data.log_gout_attack(project_root, payload),
+        lambda payload: data.log_gout_attack(project_root, payload, user_id=user_id),
         parameters=[_param("payload", "object", "发作信息。")],
         returns=_returns("integer", "新建发作记录 ID。"),
         examples=[_example("记录右脚大脚趾发作", kwargs={"payload": {"attack_date": "2026-03-21", "joint_site": "右脚大脚趾", "pain_score": 7}})],
@@ -270,7 +286,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取发作历史",
         "读取最近一段时间的痛风发作历史。",
-        lambda days=180: data.get_attack_history(project_root, days=days),
+        lambda days=180: data.get_attack_history(project_root, days=days, user_id=user_id),
         parameters=[_param("days", "integer", "向前查询的天数。", required=False, default=180)],
         returns=_returns("array<object>", "痛风发作记录列表。"),
         examples=[_example("读取半年发作历史")],
@@ -278,7 +294,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "添加药物方案",
         "新增一条药物方案。",
-        lambda payload: data.add_medication(project_root, payload),
+        lambda payload: data.add_medication(project_root, payload, user_id=user_id),
         parameters=[_param("payload", "object", "药物名称、剂量、频率等内容。")],
         returns=_returns("integer", "新建药物方案 ID。"),
         examples=[_example("新增非布司他", kwargs={"payload": {"medication_name": "非布司他", "dose": "40mg", "frequency": "每日一次"}})],
@@ -286,7 +302,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取药物列表",
         "读取药物方案列表。",
-        lambda active_only=False: data.get_medications(project_root, active_only=active_only),
+        lambda active_only=False: data.get_medications(project_root, active_only=active_only, user_id=user_id),
         parameters=[_param("active_only", "boolean", "是否只返回启用中的药物。", required=False, default=False)],
         returns=_returns("array<object>", "药物方案列表。"),
         examples=[_example("只看启用中的药物", kwargs={"active_only": True})],
@@ -300,6 +316,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
             status=status,
             scheduled_time=scheduled_time,
             taken_time=taken_time,
+            user_id=user_id,
         ),
         parameters=[
             _param("medication_id", "integer", "药物方案 ID。"),
@@ -313,7 +330,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取服药依从性",
         "读取最近一段时间的服药依从性记录。",
-        lambda days=30: data.get_medication_adherence(project_root, days=days),
+        lambda days=30: data.get_medication_adherence(project_root, days=days, user_id=user_id),
         parameters=[_param("days", "integer", "向前查询的天数。", required=False, default=30)],
         returns=_returns("array<object>", "服药记录列表。"),
         examples=[_example("读取最近 30 天服药记录")],
@@ -327,6 +344,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
             title=title,
             schedule_rule=schedule_rule,
             next_trigger_at=next_trigger_at,
+            user_id=user_id,
         ),
         parameters=[
             _param("reminder_type", "string", "提醒类型。"),
@@ -340,14 +358,14 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取启用提醒",
         "读取当前启用中的提醒。",
-        lambda: data.list_active_reminders(project_root),
+        lambda: data.list_active_reminders(project_root, user_id=user_id),
         returns=_returns("array<object>", "启用中的提醒列表。"),
         examples=[_example("读取全部启用提醒")],
     )
     registry.register(
         "获取风险快照",
         "读取风险快照历史。",
-        lambda days=90: data.get_risk_snapshots(project_root, days=days),
+        lambda days=90: data.get_risk_snapshots(project_root, days=days, user_id=user_id),
         parameters=[_param("days", "integer", "向前查询的天数。", required=False, default=90)],
         returns=_returns("array<object>", "风险快照列表。"),
         examples=[_example("读取最近 90 天风险快照")],
@@ -355,7 +373,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "保存风险快照",
         "写入一条风险快照。",
-        lambda payload: data.save_risk_snapshot(project_root, payload),
+        lambda payload: data.save_risk_snapshot(project_root, payload, user_id=user_id),
         parameters=[_param("payload", "object", "风险快照内容。")],
         returns=_returns("integer", "新建风险快照 ID。"),
         examples=[_example("保存今日风险快照", kwargs={"payload": {"snapshot_date": "2026-03-21", "overall_risk_score": 4}})],
@@ -363,10 +381,49 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取报告历史",
         "读取已保存的报告。",
-        lambda report_type=None: data.get_reports(project_root, report_type=report_type),
+        lambda report_type=None: data.get_reports(project_root, report_type=report_type, user_id=user_id),
         parameters=[_param("report_type", "string", "可选，按 weekly 或 monthly 过滤。", required=False, default=None)],
         returns=_returns("array<object>", "历史报告列表。"),
         examples=[_example("读取全部报告")],
+    )
+    registry.register(
+        "生成数字分身",
+        "基于用户资料、行为、发作和部位症状生成个人痛风数字分身。",
+        lambda profile, logs, labs, attacks, symptom_logs=None: memory.build_gout_management_twin_profile(
+            profile,
+            logs,
+            labs,
+            attacks,
+            symptom_logs=symptom_logs,
+        ),
+        parameters=[
+            _param("profile", "object", "用户资料。"),
+            _param("logs", "array<object>", "日常行为记录。"),
+            _param("labs", "array<object>", "化验记录。"),
+            _param("attacks", "array<object>", "发作记录。"),
+            _param("symptom_logs", "array<object>", "部位症状记录。", required=False, default=None),
+        ],
+        returns=_returns("object", "数字分身画像。"),
+        examples=[_example("生成当前数字分身")],
+    )
+    registry.register(
+        "保存数字分身快照",
+        "保存一份数字分身快照。",
+        lambda profile_payload, snapshot_date=None: data.save_digital_twin_profile(project_root, profile_payload, snapshot_date=snapshot_date, user_id=user_id),
+        parameters=[
+            _param("profile_payload", "object", "数字分身画像内容。"),
+            _param("snapshot_date", "string", "快照日期。", required=False, default=None),
+        ],
+        returns=_returns("integer", "新建数字分身快照 ID。"),
+        examples=[_example("保存今日数字分身快照")],
+    )
+    registry.register(
+        "获取数字分身历史",
+        "读取已保存的数字分身快照。",
+        lambda limit=20: data.get_digital_twin_profiles(project_root, limit=limit, user_id=user_id),
+        parameters=[_param("limit", "integer", "最多返回多少条快照。", required=False, default=20)],
+        returns=_returns("array<object>", "数字分身快照列表。"),
+        examples=[_example("读取最近 10 条数字分身快照", kwargs={"limit": 10})],
     )
     registry.register(
         "保存报告",
@@ -377,6 +434,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
             report=report_payload,
             period_start=period_start,
             period_end=period_end,
+            user_id=user_id,
         ),
         parameters=[
             _param("report_type", "string", "报告类型。"),
@@ -396,6 +454,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
             _param("logs", "array<object>", "每日健康记录。"),
             _param("labs", "array<object>", "化验结果。"),
             _param("attacks", "array<object>", "痛风发作记录。"),
+            _param("symptom_logs", "array<object>", "部位症状记录。", required=False, default=None),
         ],
         returns=_returns("object", "风险等级、风险分数和解释。"),
         examples=[_example("基于当前上下文计算风险")],
@@ -444,6 +503,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
             _param("logs", "array<object>", "每日健康记录。"),
             _param("labs", "array<object>", "化验结果。"),
             _param("attacks", "array<object>", "痛风发作记录。"),
+            _param("symptom_logs", "array<object>", "部位症状记录。", required=False, default=None),
         ],
         returns=_returns("object", "结构化周报对象。"),
         examples=[_example("基于当前上下文生成周报")],
@@ -494,7 +554,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "获取会话记忆",
         "读取最近的会话记忆记录。",
-        lambda limit=20: data.get_session_memories(project_root, limit=limit),
+        lambda limit=20: data.get_session_memories(project_root, limit=limit, user_id=user_id),
         parameters=[_param("limit", "integer", "返回的最大条数。", required=False, default=20)],
         returns=_returns("array<object>", "最近的会话记忆列表。"),
         examples=[_example("读取最近 10 条会话记忆", kwargs={"limit": 10})],
@@ -502,7 +562,7 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
     registry.register(
         "记录会话记忆",
         "写入一条会话记忆。",
-        lambda role, content, metadata=None: data.save_session_memory(project_root, role, content, metadata=metadata),
+        lambda role, content, metadata=None: data.save_session_memory(project_root, role, content, metadata=metadata, user_id=user_id),
         parameters=[
             _param("role", "string", "消息角色，如 user 或 assistant。"),
             _param("content", "string", "会话内容。"),
@@ -510,29 +570,5 @@ def build_default_tool_registry(project_root: Path) -> ToolRegistry:
         ],
         returns=_returns("integer", "新建会话记忆 ID。"),
         examples=[_example("记录一条用户消息", kwargs={"role": "user", "content": "今天脚趾有点疼"})],
-    )
-    registry.register(
-        "获取长期记忆快照",
-        "读取最近保存的长期记忆快照。",
-        lambda memory_type="long_term_memory", limit=5: data.get_memory_snapshots(project_root, memory_type=memory_type, limit=limit),
-        parameters=[
-            _param("memory_type", "string", "记忆类型。", required=False, default="long_term_memory"),
-            _param("limit", "integer", "返回条数。", required=False, default=5),
-        ],
-        returns=_returns("array<object>", "长期记忆快照列表。"),
-        examples=[_example("读取长期记忆快照")],
-    )
-    registry.register(
-        "生成长期记忆摘要",
-        "基于档案、记录、化验和发作历史生成长期记忆摘要。",
-        memory.build_long_term_memory,
-        parameters=[
-            _param("profile", "object", "用户档案。"),
-            _param("logs", "array<object>", "每日健康记录。"),
-            _param("labs", "array<object>", "化验结果。"),
-            _param("attacks", "array<object>", "发作记录。"),
-        ],
-        returns=_returns("object", "包含长期偏好、AI 管理意见摘要、发作模式和行为画像的记忆摘要。"),
-        examples=[_example("基于当前上下文生成长期记忆摘要")],
     )
     return registry

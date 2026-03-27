@@ -13,7 +13,7 @@ from gout_agent.ui import render_app
 
 
 st.set_page_config(
-    page_title="AI 痛风管理助手",
+    page_title="痛风健康分身",
     page_icon="",
     layout="wide",
 )

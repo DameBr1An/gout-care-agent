@@ -1,7 +1,7 @@
 ﻿---
 name: risk-assessment-skill
 description: 评估当前高尿酸和痛风发作风险，解释风险变化、诱因和异常指标。
-module: src/gout_agent/skills/risk_skill.py
+module: skills/risk-assessment-skill/runtime.py
 recommended_tools:
   - 计算痛风风险
   - 识别痛风诱因

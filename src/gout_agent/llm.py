@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
@@ -134,3 +136,54 @@ def call_local_openai_compatible(messages: list[dict[str, str]]) -> LocalLLMResu
 def ask_local_gout_llm(question: str, context: dict[str, Any]) -> LocalLLMResult:
     messages = build_gout_messages(question, context)
     return call_local_openai_compatible(messages)
+
+
+def ask_local_lab_vision_llm(file_payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    image_items = []
+    for item in file_payloads:
+        mime_type = str(item.get("type") or "")
+        content = item.get("bytes") or b""
+        if not mime_type.startswith("image/") or not content:
+            continue
+        if isinstance(content, str):
+            content = content.encode("utf-8", errors="ignore")
+        data_url = f"data:{mime_type};base64,{base64.b64encode(content).decode('ascii')}"
+        image_items.append({"type": "image_url", "image_url": {"url": data_url}})
+
+    if not image_items:
+        return {"used_vision": False, "metrics": {}, "error": "没有可供识别的图片文件。"}
+
+    prompt = (
+        "请识别这些化验报告图片中的关键指标，并只输出 JSON。"
+        "可识别字段包括：uric_acid、creatinine、egfr、bun、alt、ast、crp、esr。"
+        "JSON 格式示例："
+        '{"metrics":{"uric_acid":{"label":"尿酸","value":430},"creatinine":{"label":"肌酐","value":85}}}'
+        "如果没有识别到指标，请输出 {\"metrics\":{}}。"
+    )
+    messages = [
+        {"role": "system", "content": "你是一个化验报告结构化提取助手，只能输出 JSON。"},
+        {"role": "user", "content": [{"type": "text", "text": prompt}, *image_items]},
+    ]
+    result = call_local_openai_compatible(messages)  # type: ignore[arg-type]
+    if not result.ok:
+        return {"used_vision": True, "metrics": {}, "error": result.error_message}
+    payload = _extract_json_payload(result.content)
+    metrics = payload.get("metrics") if isinstance(payload, dict) else {}
+    return {"used_vision": True, "metrics": metrics or {}, "error": None}
+
+
+def _extract_json_payload(text: str) -> dict[str, Any]:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return {}
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", stripped, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}

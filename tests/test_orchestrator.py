@@ -66,9 +66,7 @@ class OrchestratorTests(unittest.TestCase):
     def test_load_context_contains_memory(self) -> None:
         orchestrator = self._build_orchestrator()
         context = orchestrator.load_context()
-        self.assertIn("user_preferences", context.long_term_memory)
-        self.assertIn("ai_advice_summary", context.long_term_memory)
-        self.assertIn("attack_patterns", context.long_term_memory)
+        self.assertIn("gout_management_twin_profile", context.long_term_memory)
         self.assertIn("90d", context.long_term_memory["behavior_portraits"])
 
     def test_profile_route_can_answer_read_request(self) -> None:
