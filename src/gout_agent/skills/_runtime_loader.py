@@ -4,6 +4,8 @@ from functools import lru_cache
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+from gout_agent.skills.runtime_protocol import SkillRuntimeAdapter
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
@@ -24,4 +26,4 @@ def load_runtime_module(skill_directory: str):
 
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    return SkillRuntimeAdapter(skill_directory=skill_directory, module=module)

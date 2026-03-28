@@ -540,3 +540,51 @@ def _normalize_trigger_label(value: str) -> str:
         if normalized == token or normalized == label.lower():
             return label
     return value.strip()
+
+
+def build_llm_memory_summary(long_term_memory: dict[str, Any] | None) -> dict[str, Any]:
+    memory_payload = long_term_memory or {}
+    portraits = memory_payload.get("behavior_portraits") or {}
+    twin_profile = memory_payload.get("gout_management_twin_profile") or {}
+    portrait_summary = {
+        key: (value or {}).get("summary", "")
+        for key, value in portraits.items()
+        if isinstance(value, dict)
+    }
+    twin_summary = {
+        "summary": twin_profile.get("summary", ""),
+        "top_triggers": [item.get("label") for item in (twin_profile.get("top_triggers") or [])[:3] if item.get("label")],
+        "current_shortcomings": list((twin_profile.get("current_shortcomings") or [])[:3]),
+        "stability_score": ((twin_profile.get("management_stability") or {}).get("stability_score")),
+        "site_trigger_map": {
+            site: triggers[:2]
+            for site, triggers in list((twin_profile.get("site_trigger_map") or {}).items())[:3]
+        },
+    }
+    return {
+        "behavior_portraits": portrait_summary,
+        "digital_twin_profile": twin_summary,
+        "updated_at": memory_payload.get("updated_at"),
+    }
+
+
+def build_report_memory_summary(long_term_memory: dict[str, Any] | None) -> dict[str, Any]:
+    memory_payload = long_term_memory or {}
+    portraits = memory_payload.get("behavior_portraits") or {}
+    twin_profile = memory_payload.get("gout_management_twin_profile") or {}
+    management_stability = twin_profile.get("management_stability") or {}
+    return {
+        "recent_behavior": {
+            "7d": (portraits.get("7d") or {}).get("summary", ""),
+            "30d": (portraits.get("30d") or {}).get("summary", ""),
+            "90d": (portraits.get("90d") or {}).get("summary", ""),
+        },
+        "twin_summary": twin_profile.get("summary", ""),
+        "top_triggers": [item.get("label") for item in (twin_profile.get("top_triggers") or [])[:5] if item.get("label")],
+        "focus_sites": list((twin_profile.get("site_trigger_map") or {}).keys())[:3],
+        "management_stability": {
+            "score": management_stability.get("stability_score"),
+            "level": management_stability.get("stability_level"),
+            "summary": management_stability.get("summary"),
+        },
+    }

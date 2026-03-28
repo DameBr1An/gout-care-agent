@@ -134,3 +134,24 @@ def _extract_metrics_from_text(text: str) -> dict[str, dict[str, Any]]:
                 }
                 break
     return metrics
+
+
+def prepare(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return dict(context or {})
+
+
+def run(action: str | None = None, *args, **kwargs) -> Any:
+    if action in {None, "parse_uploaded_lab_files"}:
+        return parse_uploaded_lab_files(*args, **kwargs)
+    raise ValueError(f"lab-report-skill 不支持的运行动作：{action}")
+
+
+def summarize(action: str | None = None, *args, **kwargs) -> str:
+    if action in {None, "parse_uploaded_lab_files"}:
+        result = parse_uploaded_lab_files(*args, **kwargs)
+        return str(result.get("summary") or "暂未识别到可解释的化验指标。")
+    raise ValueError(f"lab-report-skill 不支持的摘要动作：{action}")
+
+
+def persist(*args, **kwargs) -> None:
+    return None

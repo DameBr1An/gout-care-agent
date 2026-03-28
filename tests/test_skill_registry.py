@@ -39,6 +39,13 @@ class SkillRegistryTests(unittest.TestCase):
         assert skill is not None
         self.assertIn("下一步决策", skill.decision_prompt)
 
+    def test_intake_skill_exposes_write_permissions(self) -> None:
+        skill = self.registry.get_by_route("intake")
+        self.assertIsNotNone(skill)
+        assert skill is not None
+        self.assertIn("记录日常健康", skill.write_permissions)
+        self.assertIn("记录痛风发作", skill.write_permissions)
+
 
 if __name__ == "__main__":
     unittest.main()

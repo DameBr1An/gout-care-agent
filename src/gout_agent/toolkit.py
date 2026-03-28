@@ -41,6 +41,9 @@ class ToolSpec:
     name: str
     description: str
     handler: ToolHandler
+    domain: str
+    access_mode: str
+    sensitive_write: bool = False
     parameters: list[ToolParameterSpec] = field(default_factory=list)
     returns: ToolResultSpec | None = None
     examples: list[ToolExampleSpec] = field(default_factory=list)
@@ -70,6 +73,9 @@ class ToolRegistry:
         name: str,
         description: str,
         handler: ToolHandler,
+        domain: str | None = None,
+        access_mode: str | None = None,
+        sensitive_write: bool | None = None,
         parameters: list[ToolParameterSpec] | None = None,
         returns: ToolResultSpec | None = None,
         examples: list[ToolExampleSpec] | None = None,
@@ -78,6 +84,9 @@ class ToolRegistry:
             name=name,
             description=description,
             handler=handler,
+            domain=domain or _infer_tool_domain(name),
+            access_mode=access_mode or _infer_tool_access_mode(name),
+            sensitive_write=_infer_sensitive_write(name) if sensitive_write is None else sensitive_write,
             parameters=parameters or [],
             returns=returns,
             examples=examples or [],
@@ -129,6 +138,9 @@ class ToolRegistry:
             return [{"name": tool.name, "description": tool.description} for tool in tools]
         return [self._serialize_tool(tool) for tool in tools]
 
+    def get_spec(self, name: str) -> ToolSpec | None:
+        return self._tools.get(name)
+
     def get_traces(self, limit: int = 20) -> list[dict[str, Any]]:
         records = list(self._traces)[-max(limit, 0) :]
         return [serialize_tool_result(asdict(item)) for item in reversed(records)]
@@ -143,6 +155,9 @@ class ToolRegistry:
         payload: dict[str, Any] = {
             "name": tool.name,
             "description": tool.description,
+            "domain": tool.domain,
+            "access_mode": tool.access_mode,
+            "sensitive_write": tool.sensitive_write,
             "parameters": [serialize_tool_result(asdict(item)) for item in tool.parameters],
             "returns": serialize_tool_result(asdict(tool.returns)) if tool.returns else None,
             "examples": [serialize_tool_result(asdict(item)) for item in tool.examples],
@@ -207,6 +222,36 @@ def _returns(type_name: str, description: str) -> ToolResultSpec:
 
 def _example(description: str, args: list[Any] | None = None, kwargs: dict[str, Any] | None = None) -> ToolExampleSpec:
     return ToolExampleSpec(description=description, args=args or [], kwargs=kwargs or {})
+
+
+def _infer_tool_domain(name: str) -> str:
+    if any(token in name for token in ("档案", "资料")):
+        return "profile"
+    if any(token in name for token in ("日常", "部位症状", "化验", "发作")):
+        return "record"
+    if any(token in name for token in ("药物", "服药", "提醒")):
+        return "medication"
+    if any(token in name for token in ("风险", "诱因", "异常", "趋势")):
+        return "risk"
+    if any(token in name for token in ("报告", "周报", "月报")):
+        return "report"
+    if any(token in name for token in ("分身", "记忆", "画像")):
+        return "memory"
+    if "模型" in name:
+        return "llm"
+    return "system"
+
+
+def _infer_tool_access_mode(name: str) -> str:
+    if any(token in name for token in ("记录", "更新", "保存", "创建", "添加", "导出")):
+        return "write"
+    return "read"
+
+
+def _infer_sensitive_write(name: str) -> bool:
+    return _infer_tool_access_mode(name) == "write" and any(
+        token in name for token in ("更新用户档案", "记录化验结果", "保存报告", "创建提醒", "添加药物方案")
+    )
 
 
 def build_default_tool_registry(project_root: Path, user_id: int = data.DEFAULT_USER_ID) -> ToolRegistry:

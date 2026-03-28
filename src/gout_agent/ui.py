@@ -2,6 +2,7 @@
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import plotly.express as px
@@ -396,6 +397,29 @@ def _render_shell_header(page: str) -> None:
     )
 
 
+def _render_new_user_banner(context) -> None:
+    if not _is_new_user_context(context):
+        return
+
+    steps = _get_onboarding_steps(context)
+    completed = len([step for step in steps if step["done"]])
+    total = len(steps)
+    next_step = next((step for step in steps if not step["done"]), None)
+
+    body = f"先完成 {total} 个起步动作中的 {completed} 个，系统就会开始形成你的健康分身和风险变化。"
+    if next_step:
+        body += f" 当前最建议先做：{next_step['label']}。"
+
+    chips = "".join(
+        [
+            f'<span class="bullet-chip" style="background:{("#dfe9d8" if step["done"] else "rgba(239,225,207,0.9)")};color:{("#3d7b54" if step["done"] else "#9d5c2f")}">{("已完成" if step["done"] else "待完成")} · {step["label"]}</span>'
+            for step in steps
+        ]
+    )
+    st.markdown(_summary_card("新用户引导", body), unsafe_allow_html=True)
+    st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">起步清单</div>{chips}</div>', unsafe_allow_html=True)
+
+
 def _severity_color(score: float | int | None) -> str:
     if score is None:
         return "#e6ded0"
@@ -603,20 +627,35 @@ def _render_sidebar_account_settings(project_root: Path, orchestrator: AppOrches
                 height_cm = st.number_input("身高 (cm)", min_value=0.0, max_value=250.0, value=float(context.profile.get("height_cm") or 170.0), step=1.0)
                 baseline_weight_kg = st.number_input("基础体重 (kg)", min_value=0.0, max_value=300.0, value=float(context.profile.get("baseline_weight_kg") or 70.0), step=0.5)
                 target_uric_acid = st.number_input("目标尿酸", min_value=0.0, max_value=1000.0, value=float(context.profile.get("target_uric_acid") or 360.0), step=10.0)
+                confirm_profile_update = st.checkbox("我确认更新基础资料", value=False)
                 profile_submitted = st.form_submit_button("保存基础资料", use_container_width=True)
             if profile_submitted:
-                orchestrator.update_profile(
-                    {
-                        "name": name,
-                        "gender": gender,
-                        "birth_date": birth_date or None,
-                        "height_cm": height_cm,
-                        "baseline_weight_kg": baseline_weight_kg,
-                        "target_uric_acid": target_uric_acid,
-                    }
-                )
-                st.session_state["current_display_name"] = name or current_user.get("display_name") or current_user.get("username")
-                st.success("基础资料已更新。")
+                if not confirm_profile_update:
+                    st.error("更新基础资料前，请先确认本次修改。")
+                else:
+                    orchestrator.update_profile(
+                        {
+                            "name": name,
+                            "gender": gender,
+                            "birth_date": birth_date or None,
+                            "height_cm": height_cm,
+                            "baseline_weight_kg": baseline_weight_kg,
+                            "target_uric_acid": target_uric_acid,
+                        },
+                        audit_meta={"source": "account_settings", "confirmed": True},
+                    )
+                    st.session_state["current_display_name"] = name or current_user.get("display_name") or current_user.get("username")
+                    st.success("基础资料已更新。")
+
+        with st.expander("最近敏感操作", expanded=False):
+            audit_logs = orchestrator.get_write_audit_logs(limit=8)
+            if audit_logs.empty:
+                st.caption("最近还没有敏感写操作记录。")
+            else:
+                audit_view = audit_logs[["created_at", "tool_name", "source", "status", "confirmed_flag"]].copy()
+                audit_view["confirmed_flag"] = audit_view["confirmed_flag"].map(lambda value: "已确认" if bool(value) else "未确认")
+                audit_view.columns = ["时间", "操作", "来源", "状态", "确认"]
+                st.dataframe(audit_view, use_container_width=True, hide_index=True)
 
 
 def render_app(project_root: Path) -> None:
@@ -666,6 +705,7 @@ def _render_profile_hub(orchestrator: AppOrchestrator, context) -> None:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("健康分身")
     st.caption("这里优先展示你的长期模式、部位变化和个人健康分身。")
+    _render_new_user_banner(context)
     _render_memory_portrait(context, nested=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -675,6 +715,7 @@ def _render_risk_hub(orchestrator: AppOrchestrator, context) -> None:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("风险概览")
     st.caption("这里聚焦当前风险、变化原因和今天的管理重点。")
+    _render_new_user_banner(context)
     _render_dashboard(orchestrator, context, snapshot)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -683,6 +724,16 @@ def _render_record_hub(orchestrator: AppOrchestrator, context) -> None:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("数据记录")
     st.caption("这里只保留最常用的三类记录：日常行为、疼痛记录和服药记录。")
+    if _is_new_user_context(context):
+        _render_empty_guide(
+            "建议先完成今天的第一轮记录",
+            "先从最简单的日常行为开始，再补充疼痛或服药情况，系统就能逐步形成你的个人模式。",
+            [
+                "先记录今天的饮水、饮酒和是否服药",
+                "如果今天有疼痛，再用一句话描述身体部位和疼痛程度",
+                "连续记录几天后，健康分身和风险页会开始变得更丰富",
+            ],
+        )
     tab1, tab2, tab3 = st.tabs(["日常行为", "疼痛记录", "服药记录"])
     with tab1:
         _render_daily_log(orchestrator, context, nested=True, compact=True)
@@ -697,6 +748,18 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("报告中心")
     st.caption("这里保留两类核心能力：生成周期报告，以及上传化验报告后做 AI 解读。")
+    orchestrator.run_pending_background_jobs(limit=5)
+    background_jobs = orchestrator.list_background_jobs(limit=8)
+    if _is_new_user_context(context):
+        _render_empty_guide(
+            "报告会在有连续记录后更有价值",
+            "当前也可以先生成一版周期报告，但连续记录几天后，报告里的模式和建议会更准确。",
+            [
+                "先完成几天的日常行为记录",
+                "如果有疼痛或发作，再补充疼痛记录",
+                "之后再来看周报、月报或上传化验报告做解读",
+            ],
+        )
 
     left, right = st.columns([1.3, 0.7], gap="large")
     with left:
@@ -707,22 +770,49 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
             format_func=lambda x: "周报" if x == "weekly" else "月报",
             key="report_center_type",
         )
-        report_result = orchestrator.explain_report(report_type, context)
-        if report_result["source"] == "local_llm":
-            st.success("本次报告解读已结合本地模型生成。")
-        elif report_result["error"]:
-            st.warning(report_result["error"])
-        report = report_result["report"] or {}
-        st.markdown(_summary_card("报告摘要", report.get("executive_summary") or report.get("summary") or "暂无报告摘要。"), unsafe_allow_html=True)
+        report_label = "周报" if report_type == "weekly" else "月报"
+        if st.button(f"生成{report_label}", key=f"submit_{report_type}_job", use_container_width=True):
+            orchestrator.submit_background_job("report_generation", {"report_type": report_type})
+            st.success(f"{report_label}生成任务已加入队列。")
+            st.rerun()
 
-        action_plan = report.get("action_plan") or []
-        if action_plan:
-            action_text = "；".join(action_plan[:4])
-        else:
-            action_text = "暂无明确建议，建议继续保持记录。"
+        latest_report_summaries = data.get_report_summaries(
+            orchestrator.project_root,
+            report_type=report_type,
+            limit=1,
+            user_id=orchestrator.user_id,
+        )
+        report_payload = {}
+        if not latest_report_summaries.empty:
+            report_payload = latest_report_summaries.iloc[0].get("summary_payload") or {}
+        active_report_jobs = background_jobs.loc[background_jobs["job_type"] == "report_generation"].head(3) if not background_jobs.empty else pd.DataFrame()
+        if not active_report_jobs.empty:
+            chips = "".join(
+                [
+                    f'<span class="bullet-chip">{("周报" if row.get("payload", {}).get("report_type") == "weekly" else "月报")} · {row.get("status")}</span>'
+                    for _, row in active_report_jobs.iterrows()
+                ]
+            )
+            st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">报告任务状态</div>{chips}</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            _summary_card(
+                "报告摘要",
+                report_payload.get("summary") or "还没有生成本周期报告。点击上方按钮后，系统会在后台生成并在这里更新摘要。",
+            ),
+            unsafe_allow_html=True,
+        )
+
+        action_plan = report_payload.get("action_plan") or []
+        action_text = "；".join(action_plan[:4]) if action_plan else "暂无明确建议，建议继续保持记录。"
         st.markdown(_summary_card("建议", action_text), unsafe_allow_html=True)
-
-        st.markdown(_summary_card("AI 解读", report_result["explanation"]), unsafe_allow_html=True)
+        st.markdown(
+            _summary_card(
+                "AI 解读",
+                report_payload.get("explanation") or "报告生成完成后，这里会自动显示结合健康分身和近期行为的解读。",
+            ),
+            unsafe_allow_html=True,
+        )
 
     with right:
         st.markdown(_summary_card("化验报告上传", "上传图片或 PDF 后，可在这里结合当前记录查看 AI 解读。"), unsafe_allow_html=True)
@@ -751,14 +841,34 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
                 }
                 for file in uploaded_files
             ]
-            lab_result = orchestrator.explain_uploaded_lab_reports(lab_payloads, context)
+            if st.button("开始识别化验报告", key="submit_lab_parse_job", use_container_width=True):
+                orchestrator.submit_background_job("lab_report_parse", {"uploaded_files": lab_payloads})
+                st.success("化验报告识别任务已加入队列。")
+                st.rerun()
+        else:
+            st.caption("暂未上传化验报告。")
+
+        latest_parse_results = data.get_lab_report_parse_results(orchestrator.project_root, limit=1, user_id=orchestrator.user_id)
+        active_lab_jobs = background_jobs.loc[background_jobs["job_type"] == "lab_report_parse"].head(3) if not background_jobs.empty else pd.DataFrame()
+        if not active_lab_jobs.empty:
+            chips = "".join(
+                [
+                    f'<span class="bullet-chip">{row.get("status")}</span>'
+                    for _, row in active_lab_jobs.iterrows()
+                ]
+            )
+            st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">化验识别任务状态</div>{chips}</div>', unsafe_allow_html=True)
+
+        if latest_parse_results.empty:
+            st.markdown(_summary_card("AI 解读", "上传并识别化验报告后，这里会显示结合健康分身、近期行为和历史报告的解读。"), unsafe_allow_html=True)
+        else:
+            latest_parse = latest_parse_results.iloc[0].get("metrics_payload") or {}
+            lab_result = orchestrator.explain_parsed_lab_reports(latest_parse, context)
             if lab_result["source"] == "local_llm":
                 st.success("本次化验报告解读已结合本地模型生成。")
             elif lab_result["error"]:
                 st.warning(lab_result["error"])
             st.markdown(_summary_card("AI 解读", lab_result["answer"]), unsafe_allow_html=True)
-        else:
-            st.caption("暂未上传化验报告。")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1073,20 +1183,25 @@ def _render_medication_management(orchestrator: AppOrchestrator, context, nested
                     end_date = st.date_input("结束日期", value=date.today() + timedelta(days=30))
                     purpose = st.text_input("用途", value="降尿酸")
                     active_flag = st.checkbox("启用中", value=True)
+                confirm_medication_add = st.checkbox("我确认新增这条药物方案", value=False)
                 med_submitted = st.form_submit_button("添加药物")
             if med_submitted:
-                orchestrator.add_medication(
-                    {
-                        "medication_name": medication_name,
-                        "dose": dose,
-                        "frequency": frequency,
-                        "start_date": str(start_date),
-                        "end_date": str(end_date),
-                        "purpose": purpose,
-                        "active_flag": active_flag,
-                    }
-                )
-                st.success("药物已添加，请刷新或切换页面查看最新结果。")
+                if not confirm_medication_add:
+                    st.error("新增药物方案前，请先确认本次写入。")
+                else:
+                    orchestrator.add_medication(
+                        {
+                            "medication_name": medication_name,
+                            "dose": dose,
+                            "frequency": frequency,
+                            "start_date": str(start_date),
+                            "end_date": str(end_date),
+                            "purpose": purpose,
+                            "active_flag": active_flag,
+                        },
+                        audit_meta={"source": "medication_form", "confirmed": True},
+                    )
+                    st.success("药物已添加，请刷新或切换页面查看最新结果。")
 
     with right:
         st.write("**当前用药方案**")
@@ -1438,9 +1553,9 @@ def _render_memory_portrait(context, nested: bool = False) -> None:
         st.subheader("健康分身")
         st.caption("这里展示你的部位变化、近期行为和个人痛风模式。")
 
-    memory_payload = context.long_term_memory or {}
+    memory_payload = context.twin_state or {}
     portraits = memory_payload.get("behavior_portraits") or {}
-    twin_profile = memory_payload.get("gout_management_twin_profile") or {}
+    twin_profile = memory_payload.get("digital_twin_profile") or {}
     site_pain_patterns = twin_profile.get("site_pain_patterns") or {}
     is_new_user = _is_new_user_context(context)
 
@@ -1529,6 +1644,20 @@ def _render_empty_guide(title: str, body: str, steps: list[str]) -> None:
         st.write(f"{index}. {step}")
 
 
+def _get_onboarding_steps(context) -> list[dict[str, Any]]:
+    profile = context.user_journal.get("profile", {}) if getattr(context, "user_journal", None) else {}
+    has_profile = bool(profile.get("name") or profile.get("birth_date") or profile.get("height_cm"))
+    has_logs = not context.logs.empty
+    has_pain = not context.symptom_logs.empty or not context.attacks.empty
+    has_reports = len(context.logs) >= 3 or len(context.attacks) >= 1
+    return [
+        {"label": "完善基础资料", "done": has_profile},
+        {"label": "记录日常行为", "done": has_logs},
+        {"label": "补充疼痛记录", "done": has_pain},
+        {"label": "查看第一份报告", "done": has_reports},
+    ]
+
+
 def _summary_card(title: str, body: str) -> str:
     return f"""
     <div class="summary-card">
@@ -1542,7 +1671,7 @@ def _is_new_user_context(context) -> bool:
     has_logs = not context.logs.empty
     has_symptoms = not context.symptom_logs.empty
     has_attacks = not context.attacks.empty
-    twin_profile = (context.long_term_memory or {}).get("gout_management_twin_profile") or {}
+    twin_profile = (context.twin_state or {}).get("digital_twin_profile") or {}
     has_twin = bool((twin_profile.get("top_triggers") or []) or (twin_profile.get("site_pain_patterns") or {}) or twin_profile.get("summary"))
     return not any([has_logs, has_symptoms, has_attacks, has_twin])
 
@@ -1603,26 +1732,31 @@ def _render_profile_form(orchestrator: AppOrchestrator, context, form_key: str) 
         has_diabetes = st.checkbox("糖尿病", value=bool(context.profile.get("has_diabetes")))
         allergy_notes = st.text_area("过敏备注", value=context.profile.get("allergy_notes") or "")
         doctor_advice = st.text_area("长期管理建议", value=context.profile.get("doctor_advice") or "", help="填写需要长期参考的管理建议或注意事项。")
+        confirm_profile_update = st.checkbox("我确认更新基础资料", value=False)
         submitted = st.form_submit_button("保存基础资料")
     if submitted:
-        orchestrator.update_profile(
-            {
-                "name": name,
-                "gender": gender,
-                "birth_date": birth_date or None,
-                "height_cm": height_cm,
-                "baseline_weight_kg": baseline_weight_kg,
-                "target_uric_acid": target_uric_acid,
-                "has_gout_diagnosis": has_gout_diagnosis,
-                "has_hyperuricemia": has_hyperuricemia,
-                "has_ckd": has_ckd,
-                "has_hypertension": has_hypertension,
-                "has_diabetes": has_diabetes,
-                "allergy_notes": allergy_notes,
-                "doctor_advice": doctor_advice,
-            }
-        )
-        st.success("基础资料已更新，请刷新或切换页面查看最新结果。")
+        if not confirm_profile_update:
+            st.error("更新基础资料前，请先确认本次修改。")
+        else:
+            orchestrator.update_profile(
+                {
+                    "name": name,
+                    "gender": gender,
+                    "birth_date": birth_date or None,
+                    "height_cm": height_cm,
+                    "baseline_weight_kg": baseline_weight_kg,
+                    "target_uric_acid": target_uric_acid,
+                    "has_gout_diagnosis": has_gout_diagnosis,
+                    "has_hyperuricemia": has_hyperuricemia,
+                    "has_ckd": has_ckd,
+                    "has_hypertension": has_hypertension,
+                    "has_diabetes": has_diabetes,
+                    "allergy_notes": allergy_notes,
+                    "doctor_advice": doctor_advice,
+                },
+                audit_meta={"source": "profile_form", "confirmed": True},
+            )
+            st.success("基础资料已更新，请刷新或切换页面查看最新结果。")
 
 
 def _mean_numeric(frame: pd.DataFrame, column: str) -> float | None:

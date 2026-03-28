@@ -4,6 +4,7 @@ import json
 import hashlib
 import hmac
 import random
+import shutil
 import sqlite3
 import secrets
 from datetime import date, datetime, timedelta
@@ -13,6 +14,7 @@ from typing import Any
 import pandas as pd
 
 DATABASE_NAME = "gout_management.db"
+SCHEMA_VERSION = 4
 DEFAULT_USER_ID = 1
 DEFAULT_DEMO_USERNAME = "demo"
 DEFAULT_DEMO_PASSWORD = "demo123"
@@ -41,9 +43,19 @@ def _db_path(root: Path) -> Path:
     return data_dir / DATABASE_NAME
 
 
+def _backup_dir(root: Path) -> Path:
+    backup_dir = root / "data" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
 def get_connection(root: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(_db_path(root))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -256,6 +268,80 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(user_id) REFERENCES users(id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS report_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        report_type TEXT NOT NULL,
+        period_start TEXT,
+        period_end TEXT,
+        summary_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS lab_report_parse_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        source_name TEXT,
+        parse_status TEXT NOT NULL,
+        metrics_json TEXT NOT NULL,
+        raw_text TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS background_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        job_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS write_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        route_name TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        payload_json TEXT,
+        source TEXT,
+        sensitive_write INTEGER DEFAULT 0,
+        confirmed_flag INTEGER DEFAULT 0,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """,
+]
+
+INDEX_STATEMENTS = [
+    "CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username)",
+    "CREATE INDEX IF NOT EXISTS idx_daily_logs_user_date ON daily_logs(user_id, log_date)",
+    "CREATE INDEX IF NOT EXISTS idx_lab_results_user_date ON lab_results(user_id, test_date)",
+    "CREATE INDEX IF NOT EXISTS idx_gout_attacks_user_date ON gout_attacks(user_id, attack_date)",
+    "CREATE INDEX IF NOT EXISTS idx_joint_symptom_logs_user_date ON joint_symptom_logs(user_id, log_date)",
+    "CREATE INDEX IF NOT EXISTS idx_medications_user_active ON medications(user_id, active_flag)",
+    "CREATE INDEX IF NOT EXISTS idx_medication_logs_user_created ON medication_logs(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_risk_snapshots_user_date ON risk_snapshots(user_id, snapshot_date)",
+    "CREATE INDEX IF NOT EXISTS idx_reports_user_type_created ON reports(user_id, report_type, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_digital_twin_profiles_user_date ON digital_twin_profiles(user_id, snapshot_date)",
+    "CREATE INDEX IF NOT EXISTS idx_session_memories_user_created ON session_memories(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_snapshots_user_type_created ON memory_snapshots(user_id, memory_type, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_report_summaries_user_type_created ON report_summaries(user_id, report_type, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_lab_report_parse_results_user_created ON lab_report_parse_results(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_background_jobs_user_status_created ON background_jobs(user_id, status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_write_audit_logs_user_created ON write_audit_logs(user_id, created_at)",
 ]
 
 
@@ -274,6 +360,88 @@ def _verify_password(password: str, encoded: str) -> bool:
         return hmac.compare_digest(candidate, encoded)
     except Exception:
         return False
+
+
+def _get_user_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _set_user_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(f"PRAGMA user_version = {int(version)}")
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _column_exists(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    if not _table_exists(conn, table_name):
+        return False
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(str(row[1]) == column_name for row in rows)
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
+    if not _column_exists(conn, table_name, column_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
+def _create_schema_backup(root: Path, current_version: int, target_version: int) -> None:
+    db_path = _db_path(root)
+    if not db_path.exists():
+        return
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = _backup_dir(root) / f"gout_management_v{current_version}_to_v{target_version}_{timestamp}.db"
+    shutil.copy2(db_path, backup_path)
+
+
+def _migrate_to_v1(conn: sqlite3.Connection) -> None:
+    for statement in SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    for statement in INDEX_STATEMENTS:
+        conn.execute(statement)
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    for statement in SCHEMA_STATEMENTS:
+        conn.execute(statement)
+
+    _ensure_column(conn, "accounts", "active_flag", "INTEGER DEFAULT 1")
+    _ensure_column(conn, "accounts", "last_login_at", "TEXT")
+    _ensure_column(conn, "joint_symptom_logs", "stiffness_flag", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "lab_results", "crp", "REAL")
+    _ensure_column(conn, "lab_results", "esr", "REAL")
+    _ensure_column(conn, "lab_results", "ast", "REAL")
+    _ensure_column(conn, "lab_results", "alt", "REAL")
+
+    for statement in INDEX_STATEMENTS:
+        conn.execute(statement)
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    for statement in SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    for statement in INDEX_STATEMENTS:
+        conn.execute(statement)
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    for statement in SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    for statement in INDEX_STATEMENTS:
+        conn.execute(statement)
+
+
+MIGRATIONS: dict[int, Any] = {
+    1: _migrate_to_v1,
+    2: _migrate_to_v2,
+    3: _migrate_to_v3,
+    4: _migrate_to_v4,
+}
 
 
 def _seed_demo_user_data(root: Path, user_id: int = DEFAULT_USER_ID) -> None:
@@ -505,9 +673,20 @@ def _seed_demo_user_data(root: Path, user_id: int = DEFAULT_USER_ID) -> None:
 def init_db(root: Path) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     demo_password_hash = _hash_password(DEFAULT_DEMO_PASSWORD)
+    db_path = _db_path(root)
+    should_backup = db_path.exists()
     with get_connection(root) as conn:
-        for statement in SCHEMA_STATEMENTS:
-            conn.execute(statement)
+        current_version = _get_user_version(conn)
+        if current_version < SCHEMA_VERSION and should_backup:
+            _create_schema_backup(root, current_version, SCHEMA_VERSION)
+
+        for version in range(current_version + 1, SCHEMA_VERSION + 1):
+            migration = MIGRATIONS.get(version)
+            if migration is None:
+                raise ValueError(f"缺少数据库迁移步骤：v{version}")
+            migration(conn)
+            _set_user_version(conn, version)
+
         conn.execute(
             """
             INSERT OR IGNORE INTO users (id, name, gender, birth_date, height_cm, baseline_weight_kg, created_at)
@@ -555,6 +734,23 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def _frame_from_query(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
     return pd.read_sql_query(query, conn, params=params)
+
+
+def _json_ready(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.hex()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_ready(item) for item in value]
+    return str(value)
 
 
 def get_account_by_username(root: Path, username: str) -> dict[str, Any] | None:
@@ -1243,3 +1439,228 @@ def get_latest_memory_snapshot(
     row = snapshots.iloc[0].to_dict()
     payload = row.get("memory_payload")
     return payload if isinstance(payload, dict) else None
+
+
+def save_report_summary(
+    root: Path,
+    report_type: str,
+    payload: dict[str, Any],
+    period_start: str | None = None,
+    period_end: str | None = None,
+    user_id: int = DEFAULT_USER_ID,
+) -> int:
+    init_db(root)
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection(root) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO report_summaries (user_id, report_type, period_start, period_end, summary_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, report_type, period_start, period_end, json.dumps(_json_ready(payload), ensure_ascii=False), now),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def get_report_summaries(
+    root: Path,
+    report_type: str | None = None,
+    limit: int = 10,
+    user_id: int = DEFAULT_USER_ID,
+) -> pd.DataFrame:
+    init_db(root)
+    query = "SELECT * FROM report_summaries WHERE user_id = ?"
+    params: list[Any] = [user_id]
+    if report_type:
+        query += " AND report_type = ?"
+        params.append(report_type)
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(max(limit, 1))
+    with get_connection(root) as conn:
+        frame = _frame_from_query(conn, query, tuple(params))
+    if "summary_json" in frame.columns:
+        frame["summary_payload"] = frame["summary_json"].map(lambda value: json.loads(value) if value else {})
+    return frame
+
+
+def save_lab_report_parse_result(
+    root: Path,
+    source_name: str | None,
+    parse_status: str,
+    metrics_payload: dict[str, Any],
+    raw_text: str | None = None,
+    user_id: int = DEFAULT_USER_ID,
+) -> int:
+    init_db(root)
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection(root) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO lab_report_parse_results (user_id, source_name, parse_status, metrics_json, raw_text, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, source_name, parse_status, json.dumps(_json_ready(metrics_payload), ensure_ascii=False), raw_text, now),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def get_lab_report_parse_results(root: Path, limit: int = 10, user_id: int = DEFAULT_USER_ID) -> pd.DataFrame:
+    init_db(root)
+    with get_connection(root) as conn:
+        frame = _frame_from_query(
+            conn,
+            """
+            SELECT * FROM lab_report_parse_results
+            WHERE user_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (user_id, max(limit, 1)),
+        )
+    if "metrics_json" in frame.columns:
+        frame["metrics_payload"] = frame["metrics_json"].map(lambda value: json.loads(value) if value else {})
+    return frame
+
+
+def create_background_job(
+    root: Path,
+    job_type: str,
+    payload: dict[str, Any],
+    user_id: int = DEFAULT_USER_ID,
+) -> int:
+    init_db(root)
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection(root) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO background_jobs (user_id, job_type, payload_json, status, result_json, error_message, created_at, started_at, finished_at)
+            VALUES (?, ?, ?, 'queued', NULL, NULL, ?, NULL, NULL)
+            """,
+            (user_id, job_type, json.dumps(_json_ready(payload), ensure_ascii=False), now),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def update_background_job(
+    root: Path,
+    job_id: int,
+    *,
+    status: str,
+    result_payload: dict[str, Any] | None = None,
+    error_message: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+) -> None:
+    init_db(root)
+    with get_connection(root) as conn:
+        conn.execute(
+            """
+            UPDATE background_jobs
+            SET status = ?,
+                result_json = ?,
+                error_message = ?,
+                started_at = COALESCE(?, started_at),
+                finished_at = COALESCE(?, finished_at)
+            WHERE id = ?
+            """,
+            (
+                status,
+                json.dumps(_json_ready(result_payload), ensure_ascii=False) if result_payload is not None else None,
+                error_message,
+                started_at,
+                finished_at,
+                job_id,
+            ),
+        )
+        conn.commit()
+
+
+def get_background_jobs(
+    root: Path,
+    status: str | None = None,
+    limit: int = 20,
+    user_id: int = DEFAULT_USER_ID,
+) -> pd.DataFrame:
+    init_db(root)
+    query = "SELECT * FROM background_jobs WHERE user_id = ?"
+    params: list[Any] = [user_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(max(limit, 1))
+    with get_connection(root) as conn:
+        frame = _frame_from_query(conn, query, tuple(params))
+    if "payload_json" in frame.columns:
+        frame["payload"] = frame["payload_json"].map(lambda value: json.loads(value) if value else {})
+    if "result_json" in frame.columns:
+        frame["result_payload"] = frame["result_json"].map(lambda value: json.loads(value) if value else {})
+    return frame
+
+
+def get_pending_background_jobs(root: Path, limit: int = 10, user_id: int = DEFAULT_USER_ID) -> pd.DataFrame:
+    return get_background_jobs(root, status="queued", limit=limit, user_id=user_id)
+
+
+def log_write_audit(
+    root: Path,
+    route_name: str,
+    tool_name: str,
+    payload: Any,
+    *,
+    source: str | None = None,
+    sensitive_write: bool = False,
+    confirmed_flag: bool = False,
+    status: str = "executed",
+    error_message: str | None = None,
+    user_id: int = DEFAULT_USER_ID,
+) -> int:
+    init_db(root)
+    with get_connection(root) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO write_audit_logs (
+                user_id, route_name, tool_name, payload_json, source,
+                sensitive_write, confirmed_flag, status, error_message, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                route_name,
+                tool_name,
+                json.dumps(_json_ready(payload), ensure_ascii=False),
+                source,
+                int(bool(sensitive_write)),
+                int(bool(confirmed_flag)),
+                status,
+                error_message,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def get_write_audit_logs(root: Path, limit: int = 50, user_id: int = DEFAULT_USER_ID) -> pd.DataFrame:
+    init_db(root)
+    with get_connection(root) as conn:
+        frame = _frame_from_query(
+            conn,
+            """
+            SELECT *
+            FROM write_audit_logs
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+    if frame.empty:
+        return frame
+    if "payload_json" in frame.columns:
+        frame["payload"] = frame["payload_json"].apply(lambda value: json.loads(value) if isinstance(value, str) and value.strip() else {})
+    return frame

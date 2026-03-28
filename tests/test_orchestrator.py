@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from gout_agent.risk import RiskResult
+from gout_agent import data
 from gout_agent.skills.orchestrator import AppOrchestrator
 
 
@@ -68,6 +69,18 @@ class OrchestratorTests(unittest.TestCase):
         context = orchestrator.load_context()
         self.assertIn("gout_management_twin_profile", context.long_term_memory)
         self.assertIn("90d", context.long_term_memory["behavior_portraits"])
+        self.assertIn("digital_twin_profile", context.twin_state)
+        self.assertIn("memory_summary", context.twin_state)
+
+    def test_skill_runtimes_are_exposed_through_unified_adapter(self) -> None:
+        orchestrator = self._build_orchestrator()
+        runtime = orchestrator._get_skill_runtime("intake")
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertTrue(callable(runtime.prepare))
+        self.assertTrue(callable(runtime.run))
+        self.assertTrue(callable(runtime.summarize))
+        self.assertTrue(callable(runtime.persist))
 
     def test_profile_route_can_answer_read_request(self) -> None:
         orchestrator = self._build_orchestrator()
@@ -170,6 +183,43 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(decide_steps)
         self.assertIn("confidence", decide_steps[0]["decision"])
         self.assertIn("reason", decide_steps[0]["decision"])
+
+    def test_background_report_job_can_run_and_persist_summary(self) -> None:
+        orchestrator = self._build_orchestrator()
+        job_id = orchestrator.submit_background_job("report_generation", {"report_type": "weekly"})
+        results = orchestrator.run_pending_background_jobs(limit=5)
+        self.assertTrue(any(item["job_id"] == job_id and item["status"] == "completed" for item in results))
+        summaries = data.get_report_summaries(self.temp_root, report_type="weekly", user_id=orchestrator.user_id)
+        self.assertFalse(summaries.empty)
+
+    def test_background_lab_parse_job_can_run_and_persist_result(self) -> None:
+        orchestrator = self._build_orchestrator()
+        uploaded_files = [
+            {
+                "name": "lab.txt",
+                "type": "text/plain",
+                "content_bytes": "尿酸 512 umol/L\n肌酐 83 umol/L".encode("utf-8"),
+            }
+        ]
+        job_id = orchestrator.submit_background_job("lab_report_parse", {"uploaded_files": uploaded_files})
+        results = orchestrator.run_pending_background_jobs(limit=5)
+        self.assertTrue(any(item["job_id"] == job_id and item["status"] == "completed" for item in results))
+        parse_results = data.get_lab_report_parse_results(self.temp_root, user_id=orchestrator.user_id)
+        self.assertFalse(parse_results.empty)
+
+    def test_sensitive_write_requires_confirmation_and_is_audited(self) -> None:
+        orchestrator = self._build_orchestrator()
+        with self.assertRaises(PermissionError):
+            orchestrator.add_medication(
+                {
+                    "medication_name": "非布司他",
+                    "dose": "40mg",
+                    "frequency": "每日一次",
+                }
+            )
+        audit_logs = data.get_write_audit_logs(self.temp_root, user_id=orchestrator.user_id)
+        self.assertFalse(audit_logs.empty)
+        self.assertEqual(audit_logs.iloc[0]["status"], "blocked")
 
 
 if __name__ == "__main__":

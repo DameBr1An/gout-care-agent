@@ -76,6 +76,25 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("current_shortcomings", twin)
         self.assertTrue(twin["top_triggers"])
 
+    def test_memory_summary_builders_return_compact_payloads(self) -> None:
+        logs = pd.DataFrame(
+            [
+                {"log_date": "2026-03-20", "water_ml": 1800, "alcohol_intake": "beer", "pain_score": 1, "medication_taken_flag": 1},
+                {"log_date": "2026-03-21", "water_ml": 2200, "alcohol_intake": "none", "pain_score": 0, "medication_taken_flag": 1},
+            ]
+        )
+        labs = pd.DataFrame([{"test_date": "2026-03-21", "uric_acid": 510}])
+        attacks = pd.DataFrame([{"attack_date": "2026-03-20", "joint_site": "right_big_toe", "pain_score": 7, "suspected_trigger": "beer"}])
+
+        payload = memory.build_long_term_memory({}, logs, labs, attacks)
+        llm_summary = memory.build_llm_memory_summary(payload)
+        report_summary = memory.build_report_memory_summary(payload)
+
+        self.assertIn("behavior_portraits", llm_summary)
+        self.assertIn("digital_twin_profile", llm_summary)
+        self.assertIn("recent_behavior", report_summary)
+        self.assertIn("twin_summary", report_summary)
+
 
 if __name__ == "__main__":
     unittest.main()

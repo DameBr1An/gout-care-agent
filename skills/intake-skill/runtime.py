@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from typing import Any
 
 
 def parse_free_text_entry(text: str) -> dict:
@@ -56,3 +57,33 @@ def parse_free_text_entry(text: str) -> dict:
         payload["medication_taken_flag"] = False
 
     return payload
+
+
+def prepare(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return dict(context or {})
+
+
+def run(action: str | None = None, *args, **kwargs) -> Any:
+    if action in {None, "parse_free_text_entry"}:
+        return parse_free_text_entry(*args, **kwargs)
+    raise ValueError(f"intake-skill 不支持的运行动作：{action}")
+
+
+def summarize(action: str | None = None, *args, **kwargs) -> str:
+    if action in {None, "parse_free_text_entry"}:
+        payload = parse_free_text_entry(*args, **kwargs)
+        parts: list[str] = []
+        if payload.get("water_ml") is not None:
+            parts.append(f"饮水约 {int(payload['water_ml'])} mL")
+        if payload.get("alcohol_intake"):
+            parts.append(f"饮酒类型：{payload['alcohol_intake']}")
+        if payload.get("pain_score") is not None:
+            parts.append(f"疼痛 {int(payload['pain_score'])} 分")
+        if payload.get("joint_pain_flag"):
+            parts.append("提到了关节疼痛")
+        return "；".join(parts) if parts else "这是一条待写入的日常或症状描述。"
+    raise ValueError(f"intake-skill 不支持的摘要动作：{action}")
+
+
+def persist(*args, **kwargs) -> None:
+    return None

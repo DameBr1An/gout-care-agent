@@ -23,6 +23,7 @@ class AppContext:
     user_journal: dict[str, Any]
     site_history: pd.DataFrame
     risk_overview: dict[str, Any]
+    twin_state: dict[str, Any]
     profile: dict[str, Any]
     logs: pd.DataFrame
     symptom_logs: pd.DataFrame
@@ -80,6 +81,15 @@ class AppOrchestrator:
         self.reporting_runtime = load_runtime_module("report-explanation-skill")
         self.lab_report_runtime = load_runtime_module("lab-report-skill")
         self.risk_runtime = load_runtime_module("risk-assessment-skill")
+        self.skill_runtimes = {
+            "intake": self.intake_runtime,
+            "profile": None,
+            "risk_assessment": self.risk_runtime,
+            "lifestyle_coach": self.lifestyle_runtime,
+            "medication_followup": self.medication_runtime,
+            "reporting": self.reporting_runtime,
+            "lab_report": self.lab_report_runtime,
+        }
         self.agent_graph = self._build_agent_graph()
         self.preview_graph = self._build_agent_graph(dry_run=True)
         self.intake_graph = self._build_intake_graph()
@@ -115,13 +125,32 @@ class AppOrchestrator:
         user_journal = self._build_user_journal(profile, logs)
         site_history = self._build_site_history(symptom_logs, attacks)
         risk_overview = self._build_risk_overview(risk_result, trigger_summary, [item.message for item in abnormal_metrics])
-        return AppContext(user_journal=user_journal, site_history=site_history, risk_overview=risk_overview, profile=profile, logs=logs, symptom_logs=symptom_logs, labs=labs, attacks=attacks, medications=medications, reminders=reminders, risk_result=risk_result, trigger_summary=trigger_summary, abnormal_items=[item.message for item in abnormal_metrics], medication_completion_rate=self._medication_completion_rate(logs.tail(7)), llm_status=self.registry.call("获取本地模型状态", _trace_context=trace), long_term_memory=long_term_memory, session_memories=session_memories)
+        twin_state = self._build_twin_state(long_term_memory, risk_overview)
+        return AppContext(user_journal=user_journal, site_history=site_history, risk_overview=risk_overview, twin_state=twin_state, profile=profile, logs=logs, symptom_logs=symptom_logs, labs=labs, attacks=attacks, medications=medications, reminders=reminders, risk_result=risk_result, trigger_summary=trigger_summary, abnormal_items=[item.message for item in abnormal_metrics], medication_completion_rate=self._medication_completion_rate(logs.tail(7)), llm_status=self.registry.call("获取本地模型状态", _trace_context=trace), long_term_memory=long_term_memory, session_memories=session_memories)
 
     def get_ui_snapshot(self, context: AppContext) -> dict[str, Any]:
         return {"latest_uric_acid": None, "attack_risk_label": context.risk_overview.get("attack_risk_label"), "uric_acid_risk_label": context.risk_overview.get("uric_acid_risk_label"), "overall_risk_score": context.risk_overview.get("overall_risk_score"), "explanation": context.risk_overview.get("explanation"), "hydration_advice": context.risk_overview.get("hydration_advice"), "diet_advice": context.risk_overview.get("diet_advice"), "exercise_advice": context.risk_overview.get("exercise_advice"), "behavior_goal": context.risk_overview.get("behavior_goal"), "abnormal_items": context.risk_overview.get("abnormal_items", []), "trigger_summary": context.risk_overview.get("trigger_summary", []), "medication_completion_rate": context.medication_completion_rate, "active_reminder_count": len(context.reminders), "active_medication_count": len(context.medications.loc[context.medications["active_flag"] == 1]) if not context.medications.empty and "active_flag" in context.medications.columns else 0, "llm_status": context.llm_status}
 
+    def _build_twin_state(self, long_term_memory: dict[str, Any], risk_overview: dict[str, Any]) -> dict[str, Any]:
+        behavior_portraits = long_term_memory.get("behavior_portraits") or {}
+        digital_twin_profile = long_term_memory.get("gout_management_twin_profile") or {}
+        return {
+            "behavior_portraits": behavior_portraits,
+            "digital_twin_profile": digital_twin_profile,
+            "memory_summary": memory.build_llm_memory_summary(long_term_memory),
+            "report_memory_summary": memory.build_report_memory_summary(long_term_memory),
+            "risk_anchor": {
+                "attack_risk_label": risk_overview.get("attack_risk_label"),
+                "overall_risk_score": risk_overview.get("overall_risk_score"),
+            },
+            "updated_at": long_term_memory.get("updated_at"),
+        }
+
     def answer_coach_question(self, question: str, context: AppContext) -> dict[str, Any]:
         return self.run_agent_loop(question, context)
+
+    def _get_skill_runtime(self, route_name: str):
+        return self.skill_runtimes.get(route_name)
 
     def preview_agent_loop(self, question: str, max_steps: int = 8) -> dict[str, Any]:
         question = question.strip()
@@ -460,13 +489,26 @@ class AppOrchestrator:
     def explain_report(self, period_type: str, context: AppContext) -> dict[str, Any]:
         plan = self.build_execution_plan("reporting", intent="explain", period_type=period_type)
         report_payload = self._execute_reporting_plan(plan, context, "json")["report_payload"]
+        runtime = self._get_skill_runtime("reporting")
         llm_context = self._build_interpretation_context(context, selected_report=report_payload, period_type=period_type)
+        if runtime is not None:
+            llm_context = runtime.prepare(llm_context, report_payload=report_payload, twin_state=context.twin_state, period_type=period_type)
         llm_context.update({"allowed_tools": self.get_allowed_tools("reporting"), "execution_plan": plan})
         llm_result = self.registry.call("调用本地痛风模型", "请结合这份周期报告、当前健康分身、近期 7/30/90 天行为变化、历史报告摘要和当前风险，用简洁中文解读本期情况，说明现在最重要的变化、主要诱因、今天的重点行动，以及什么情况下要及时就医。", llm_context, _trace_context=self._trace_context("reporting", source="llm_report"))
-        return {"report": report_payload, "explanation": llm_result.content if llm_result.ok else self.reporting_runtime.explain_report(report_payload, self.serialize_context(context)), "source": "local_llm" if llm_result.ok else "rule_fallback", "error": None if llm_result.ok else llm_result.error_message}
+        fallback_text = runtime.summarize("explain_report", report_payload, self.serialize_context(context)) if runtime is not None else self.reporting_runtime.explain_report(report_payload, self.serialize_context(context))
+        return {"report": report_payload, "explanation": llm_result.content if llm_result.ok else fallback_text, "source": "local_llm" if llm_result.ok else "rule_fallback", "error": None if llm_result.ok else llm_result.error_message}
 
     def explain_uploaded_lab_reports(self, uploaded_files: list[dict[str, Any]], context: AppContext) -> dict[str, Any]:
-        parsed_lab_reports = self.lab_report_runtime.parse_uploaded_lab_files(uploaded_files, self._extract_lab_metrics_with_local_model)
+        runtime = self._get_skill_runtime("lab_report")
+        parsed_lab_reports = runtime.run("parse_uploaded_lab_files", uploaded_files, self._extract_lab_metrics_with_local_model) if runtime is not None else self.lab_report_runtime.parse_uploaded_lab_files(uploaded_files, self._extract_lab_metrics_with_local_model)
+        return self.explain_parsed_lab_reports(parsed_lab_reports, context, uploaded_files=uploaded_files)
+
+    def explain_parsed_lab_reports(
+        self,
+        parsed_lab_reports: dict[str, Any],
+        context: AppContext,
+        uploaded_files: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         llm_context = self._build_interpretation_context(context, uploaded_lab_reports=uploaded_files, parsed_lab_reports=parsed_lab_reports)
         llm_result = self.registry.call(
             "调用本地痛风模型",
@@ -483,7 +525,9 @@ class AppOrchestrator:
         plan = self.build_execution_plan("reporting", intent="export", period_type=period_type)
         return self._execute_reporting_plan(plan, context, format_name)["path"]
 
-    def parse_intake_text(self, text: str) -> dict[str, Any]: return self.intake_runtime.parse_free_text_entry(text)
+    def parse_intake_text(self, text: str) -> dict[str, Any]:
+        runtime = self._get_skill_runtime("intake")
+        return runtime.run("parse_free_text_entry", text) if runtime is not None else self.intake_runtime.parse_free_text_entry(text)
     def describe_skills(self) -> list[dict[str, Any]]: return self.skill_registry.describe()
     def describe_tools(self, include_schema: bool = False) -> list[dict[str, Any]]: return self.registry.describe(include_schema=include_schema)
     def get_recent_traces(self, limit: int = 20) -> list[dict[str, Any]]: return self.registry.get_traces(limit=limit)
@@ -491,6 +535,45 @@ class AppOrchestrator:
     def is_tool_allowed(self, route_name: str, tool_name: str) -> bool:
         allowed_tools = self.get_allowed_tools(route_name)
         return route_name == "orchestrator" if not allowed_tools else tool_name in allowed_tools
+    def list_background_jobs(self, status: str | None = None, limit: int = 20) -> pd.DataFrame:
+        return data.get_background_jobs(self.project_root, status=status, limit=limit, user_id=self.user_id)
+
+    def submit_background_job(self, job_type: str, payload: dict[str, Any] | None = None) -> int:
+        payload = payload or {}
+        return data.create_background_job(self.project_root, job_type, payload, user_id=self.user_id)
+
+    def run_pending_background_jobs(self, limit: int = 5) -> list[dict[str, Any]]:
+        jobs = data.get_pending_background_jobs(self.project_root, limit=limit, user_id=self.user_id)
+        results: list[dict[str, Any]] = []
+        if jobs.empty:
+            return results
+        for _, row in jobs.iterrows():
+            job_id = int(row["id"])
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                payload = {}
+            started_at = pd.Timestamp.now().isoformat()
+            data.update_background_job(self.project_root, job_id, status="running", started_at=started_at)
+            try:
+                result_payload = self._execute_background_job(str(row.get("job_type") or ""), payload)
+                data.update_background_job(
+                    self.project_root,
+                    job_id,
+                    status="completed",
+                    result_payload=result_payload,
+                    finished_at=pd.Timestamp.now().isoformat(),
+                )
+                results.append({"job_id": job_id, "status": "completed", "result": result_payload})
+            except Exception as exc:
+                data.update_background_job(
+                    self.project_root,
+                    job_id,
+                    status="failed",
+                    error_message=str(exc),
+                    finished_at=pd.Timestamp.now().isoformat(),
+                )
+                results.append({"job_id": job_id, "status": "failed", "error": str(exc)})
+        return results
 
     def build_execution_plan(self, route_name: str, intent: str | None = None, period_type: str = "weekly") -> list[str]:
         execution_tools = self.skill_registry.get_execution_tools(route_name) or self.get_allowed_tools(route_name)
@@ -516,17 +599,107 @@ class AppOrchestrator:
             return plan
         return [tool for tool in execution_tools if tool in allowed_tools]
 
-    def save_daily_log(self, payload: dict[str, Any]) -> Any: return self._call_skill_tool("intake", "记录日常健康", payload)
-    def save_joint_symptom(self, payload: dict[str, Any]) -> Any: return self._call_skill_tool("intake", "记录部位症状", payload)
-    def save_lab_result(self, payload: dict[str, Any]) -> Any: return self._call_skill_tool("intake", "记录化验结果", payload)
-    def update_profile(self, payload: dict[str, Any]) -> Any:
+    def save_daily_log(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录日常健康", payload, _audit_meta=audit_meta)["result"]
+    def save_joint_symptom(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录部位症状", payload, _audit_meta=audit_meta)["result"]
+    def save_lab_result(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录化验结果", payload, _audit_meta=audit_meta)["result"]
+    def update_profile(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any:
         if "获取用户档案" in self.build_execution_plan("profile", intent="update"): self._call_skill_tool("profile", "获取用户档案")
-        return self._call_skill_tool("profile", "更新用户档案", payload)
+        return self._run_write_action("profile", "更新用户档案", payload, _audit_meta=audit_meta)["result"]
     def get_profile(self) -> Any: return self._call_skill_tool("profile", (self.build_execution_plan("profile", intent="read") or ["获取用户档案"])[0])
-    def save_attack(self, payload: dict[str, Any]) -> Any: return self._call_skill_tool("intake", "记录痛风发作", payload)
-    def add_medication(self, payload: dict[str, Any]) -> Any: return self._call_skill_tool("medication_followup", "添加药物方案", payload)
-    def create_reminder(self, reminder_type: str, title: str, schedule_rule: str, next_trigger_at: str) -> Any: return self._call_skill_tool("medication_followup", "创建提醒", reminder_type, title, schedule_rule, next_trigger_at)
-    def log_medication_taken(self, medication_id: int, status: str, taken_time: str | None = None) -> Any: return self._call_skill_tool("medication_followup", "记录服药情况", medication_id, status, None, taken_time)
+    def save_attack(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录痛风发作", payload, _audit_meta=audit_meta)["result"]
+    def add_medication(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("medication_followup", "添加药物方案", payload, _audit_meta=audit_meta)["result"]
+    def create_reminder(self, reminder_type: str, title: str, schedule_rule: str, next_trigger_at: str, audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("medication_followup", "创建提醒", reminder_type, title, schedule_rule, next_trigger_at, _audit_meta=audit_meta)["result"]
+    def log_medication_taken(self, medication_id: int, status: str, taken_time: str | None = None, audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("medication_followup", "记录服药情况", medication_id, status, None, taken_time, _audit_meta=audit_meta)["result"]
+    def get_write_audit_logs(self, limit: int = 50) -> pd.DataFrame:
+        return data.get_write_audit_logs(self.project_root, limit=limit, user_id=self.user_id)
+
+    def _run_write_action(self, route_name: str, tool_name: str, *args, **kwargs) -> dict[str, Any]:
+        audit_meta = kwargs.pop("_audit_meta", None) or {}
+        tool_spec = self.registry.get_spec(tool_name)
+        payload_preview = {"args": serialize_tool_result(list(args)), "kwargs": serialize_tool_result(kwargs)}
+        source = str(audit_meta.get("source") or "ui_form")
+        confirmed = bool(audit_meta.get("confirmed"))
+        if tool_spec and tool_spec.sensitive_write and not confirmed:
+            data.log_write_audit(
+                self.project_root,
+                route_name,
+                tool_name,
+                payload_preview,
+                source=source,
+                sensitive_write=True,
+                confirmed_flag=False,
+                status="blocked",
+                error_message="敏感写操作缺少确认",
+                user_id=self.user_id,
+            )
+            raise PermissionError(f"工具 {tool_name} 属于敏感写操作，需要显式确认。")
+        try:
+            result = self._call_skill_tool(route_name, tool_name, *args, **kwargs)
+        except Exception as exc:
+            if tool_spec and tool_spec.access_mode == "write":
+                data.log_write_audit(
+                    self.project_root,
+                    route_name,
+                    tool_name,
+                    payload_preview,
+                    source=source,
+                    sensitive_write=bool(tool_spec.sensitive_write),
+                    confirmed_flag=confirmed,
+                    status="failed",
+                    error_message=str(exc),
+                    user_id=self.user_id,
+                )
+            raise
+        if tool_spec and tool_spec.access_mode == "write":
+            data.log_write_audit(
+                self.project_root,
+                route_name,
+                tool_name,
+                payload_preview,
+                source=source,
+                sensitive_write=bool(tool_spec.sensitive_write),
+                confirmed_flag=confirmed,
+                status="executed",
+                user_id=self.user_id,
+            )
+        refreshed_context = self._refresh_context_state()
+        return {"result": result, "context": refreshed_context, "ui_snapshot": self.get_ui_snapshot(refreshed_context)}
+
+    def _refresh_context_state(self) -> AppContext:
+        refreshed_context = self.load_context()
+        self.sync_daily_snapshot(refreshed_context)
+        return refreshed_context
+
+    def _execute_background_job(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        context = self.load_context()
+        if job_type == "report_generation":
+            report_type = str(payload.get("report_type") or "weekly")
+            report_result = self.explain_report(report_type, context)
+            report_payload = report_result.get("report") or {}
+            period_text = str(report_payload.get("period") or "")
+            period_start, period_end = (period_text.split(" 至 ", 1) + [None])[:2] if " 至 " in period_text else (None, None)
+            summary_payload = {
+                "summary": report_payload.get("executive_summary") or report_payload.get("summary"),
+                "action_plan": report_payload.get("action_plan") or report_payload.get("suggestions") or [],
+                "source": report_result.get("source"),
+                "explanation": report_result.get("explanation"),
+                "report": report_payload,
+            }
+            data.save_report_summary(self.project_root, report_type, summary_payload, period_start, period_end, user_id=self.user_id)
+            return {"report_type": report_type, "summary": summary_payload.get("summary"), "source": report_result.get("source")}
+        if job_type == "lab_report_parse":
+            uploaded_files = list(payload.get("uploaded_files") or [])
+            runtime = self._get_skill_runtime("lab_report")
+            parsed = runtime.run("parse_uploaded_lab_files", uploaded_files, self._extract_lab_metrics_with_local_model) if runtime is not None else self.lab_report_runtime.parse_uploaded_lab_files(uploaded_files, self._extract_lab_metrics_with_local_model)
+            source_name = uploaded_files[0].get("name") if uploaded_files else None
+            parse_status = "parsed" if parsed.get("metrics") else "fallback"
+            data.save_lab_report_parse_result(self.project_root, source_name, parse_status, parsed, parsed.get("raw_text"), user_id=self.user_id)
+            return {"parse_status": parse_status, "metric_keys": list((parsed.get("metrics") or {}).keys())}
+        if job_type == "twin_refresh":
+            refreshed_context = self._refresh_context_state()
+            twin_profile = refreshed_context.long_term_memory.get("gout_management_twin_profile") or {}
+            return {"summary": twin_profile.get("summary"), "updated_at": twin_profile.get("updated_at")}
+        raise ValueError(f"不支持的后台任务类型：{job_type}")
 
     def sync_daily_snapshot(self, context: AppContext) -> None:
         existing = self.registry.call("获取风险快照", 2, _trace_context=self._trace_context("orchestrator", source="snapshot"))
@@ -535,11 +708,11 @@ class AppOrchestrator:
         self.registry.call("保存风险快照", {"snapshot_date": today, "uric_acid_risk_level": context.risk_result.uric_acid_risk_level, "attack_risk_level": context.risk_result.attack_risk_level, "overall_risk_score": context.risk_result.overall_risk_score, "top_risk_factors": context.risk_result.top_risk_factors, "trend_direction": context.risk_result.trend_direction}, _trace_context=self._trace_context("orchestrator", source="snapshot"))
 
     def serialize_context(self, context: AppContext) -> dict[str, Any]:
-        return {"user_journal": context.user_journal, "site_history": context.site_history.tail(20).to_dict(orient="records") if not context.site_history.empty else [], "risk_overview": context.risk_overview, "risk_result": {"uric_acid_risk_level": context.risk_result.uric_acid_risk_level, "attack_risk_level": context.risk_result.attack_risk_level, "uric_acid_risk_level_cn": self.label_risk(context.risk_result.uric_acid_risk_level), "attack_risk_level_cn": self.label_risk(context.risk_result.attack_risk_level), "overall_risk_score": context.risk_result.overall_risk_score, "explanation": context.risk_result.explanation, "hydration_advice": context.risk_result.hydration_advice, "diet_advice": context.risk_result.diet_advice, "exercise_advice": context.risk_result.exercise_advice, "behavior_goal": context.risk_result.behavior_goal}, "trigger_summary": context.trigger_summary, "abnormal_items": context.abnormal_items, "medication_completion_rate": context.medication_completion_rate, "active_reminder_count": len(context.reminders), "long_term_memory": context.long_term_memory, "session_memories": context.session_memories, "recent_symptom_logs": context.symptom_logs.tail(20).to_dict(orient="records") if not context.symptom_logs.empty else []}
+        return {"user_journal": context.user_journal, "site_history": context.site_history.tail(20).to_dict(orient="records") if not context.site_history.empty else [], "risk_overview": context.risk_overview, "risk_result": {"uric_acid_risk_level": context.risk_result.uric_acid_risk_level, "attack_risk_level": context.risk_result.attack_risk_level, "uric_acid_risk_level_cn": self.label_risk(context.risk_result.uric_acid_risk_level), "attack_risk_level_cn": self.label_risk(context.risk_result.attack_risk_level), "overall_risk_score": context.risk_result.overall_risk_score, "explanation": context.risk_result.explanation, "hydration_advice": context.risk_result.hydration_advice, "diet_advice": context.risk_result.diet_advice, "exercise_advice": context.risk_result.exercise_advice, "behavior_goal": context.risk_result.behavior_goal}, "trigger_summary": context.trigger_summary, "abnormal_items": context.abnormal_items, "medication_completion_rate": context.medication_completion_rate, "active_reminder_count": len(context.reminders), "twin_state": context.twin_state, "long_term_memory": context.long_term_memory, "session_memories": context.session_memories, "recent_symptom_logs": context.symptom_logs.tail(20).to_dict(orient="records") if not context.symptom_logs.empty else []}
 
     def _build_llm_context(self, context: AppContext) -> dict[str, Any]:
         payload = self.serialize_context(context)
-        payload.update({"user_profile": context.user_journal.get("profile", {}), "recent_health_records": context.user_journal.get("recent_health_records", []), "site_history_preview": context.site_history.head(10).to_dict(orient="records") if not context.site_history.empty else [], "latest_daily_log": context.logs.iloc[-1].to_dict() if not context.logs.empty else {}, "recent_symptom_logs": context.symptom_logs.head(10).to_dict(orient="records") if not context.symptom_logs.empty else [], "recent_attack_records": context.attacks.head(5).to_dict(orient="records") if not context.attacks.empty else [], "behavior_portraits": context.long_term_memory.get("behavior_portraits"), "digital_twin_profile": context.long_term_memory.get("gout_management_twin_profile"), "recent_session_memories": context.session_memories[-6:]})
+        payload.update({"user_profile": context.user_journal.get("profile", {}), "recent_health_records": context.user_journal.get("recent_health_records", []), "site_history_preview": context.site_history.head(10).to_dict(orient="records") if not context.site_history.empty else [], "latest_daily_log": context.logs.iloc[-1].to_dict() if not context.logs.empty else {}, "recent_symptom_logs": context.symptom_logs.head(10).to_dict(orient="records") if not context.symptom_logs.empty else [], "recent_attack_records": context.attacks.head(5).to_dict(orient="records") if not context.attacks.empty else [], "behavior_portraits": context.twin_state.get("behavior_portraits"), "digital_twin_profile": context.twin_state.get("digital_twin_profile"), "recent_session_memories": context.session_memories[-6:], "memory_summary": context.twin_state.get("memory_summary"), "state_summary": self._build_harness_state_summary(context), "twin_state": context.twin_state})
         return payload
 
     def _build_interpretation_context(
@@ -579,9 +752,32 @@ class AppOrchestrator:
                 "current_risk_overview": context.risk_overview,
                 "uploaded_lab_reports": uploaded_lab_reports or [],
                 "parsed_lab_reports": parsed_lab_reports or {},
+                "report_memory_summary": context.twin_state.get("report_memory_summary"),
             }
         )
         return payload
+
+    def _build_harness_state_summary(self, context: AppContext) -> dict[str, Any]:
+        latest_sites = []
+        if not context.site_history.empty and "site" in context.site_history.columns:
+            latest_sites = list(dict.fromkeys(context.site_history.head(5)["site"].dropna().astype(str).tolist()))
+        return {
+            "user_journal_summary": {
+                "has_profile": bool(context.user_journal.get("profile")),
+                "recent_record_count": len(context.user_journal.get("recent_health_records", [])),
+                "latest_record": context.user_journal.get("latest_record", {}),
+            },
+            "site_history_summary": {
+                "recent_event_count": int(min(len(context.site_history), 14)),
+                "latest_sites": latest_sites,
+            },
+            "risk_summary": {
+                "attack_risk_label": context.risk_overview.get("attack_risk_label"),
+                "overall_risk_score": context.risk_overview.get("overall_risk_score"),
+                "top_triggers": [item.get("label") for item in context.risk_overview.get("trigger_summary", [])[:3] if item.get("label")],
+                "abnormal_items": context.risk_overview.get("abnormal_items", [])[:3],
+            },
+        }
 
     def _extract_lab_metrics_with_local_model(self, uploaded_files: list[dict[str, Any]]) -> dict[str, Any]:
         return llm.ask_local_lab_vision_llm(uploaded_files)
@@ -847,8 +1043,18 @@ class AppOrchestrator:
         return {"report_payload": report_payload, "path": path}
 
     def _call_skill_tool(self, route_name: str, tool_name: str, *args, **kwargs) -> Any:
-        if not self.is_tool_allowed(route_name, tool_name): raise PermissionError("技能 %s 不允许调用工具 %s；允许工具为：%s" % (route_name, tool_name, "、".join(self.get_allowed_tools(route_name)) or "无"))
+        self._assert_skill_tool_permission(route_name, tool_name)
         return self.registry.call(tool_name, *args, _trace_context=self._trace_context(route_name), **kwargs)
+
+    def _assert_skill_tool_permission(self, route_name: str, tool_name: str) -> None:
+        if not self.is_tool_allowed(route_name, tool_name):
+            raise PermissionError("技能 %s 不允许调用工具 %s；允许工具为：%s" % (route_name, tool_name, "、".join(self.get_allowed_tools(route_name)) or "无"))
+        skill = self.skill_registry.get_by_route(route_name)
+        tool_spec = self.registry.get_spec(tool_name)
+        if skill is None or tool_spec is None:
+            return
+        if tool_spec.access_mode == "write" and tool_name not in skill.write_permissions:
+            raise PermissionError("技能 %s 没有写权限调用工具 %s。" % (route_name, tool_name))
 
     def _trace_context(self, route_name: str, source: str = "skill_tool") -> dict[str, str]:
         skill = self.skill_registry.get_by_route(route_name)
@@ -857,6 +1063,7 @@ class AppOrchestrator:
     def _fallback_answer(self, question: str, route_name: str, context: AppContext, observations: dict[str, Any] | None = None) -> str:
         observations = observations or {}
         serialized = self.serialize_context(context)
+        runtime = self._get_skill_runtime(route_name)
         if route_name == "profile": return self._summarize_profile(observations.get("获取用户档案") or self.get_profile())
         if route_name == "risk_assessment":
             risk_payload = observations.get("计算痛风风险")
@@ -864,24 +1071,40 @@ class AppOrchestrator:
             abnormal_payload = observations.get("识别异常指标")
             if risk_payload is not None:
                 local_context = {"risk_result": {"uric_acid_risk_level_cn": self.label_risk(risk_payload.uric_acid_risk_level), "attack_risk_level_cn": self.label_risk(risk_payload.attack_risk_level), "overall_risk_score": risk_payload.overall_risk_score, "explanation": risk_payload.explanation}, "trigger_summary": [{"label": TRIGGER_LABELS.get(name, name), "count": count} for name, count in list((trigger_payload or {}).items())[:5]], "abnormal_items": [item.message for item in (abnormal_payload or [])]}
+                if runtime is not None:
+                    return runtime.summarize("summarize_risk", local_context) + "\n" + runtime.summarize("summarize_triggers", local_context) + "\n" + runtime.summarize("summarize_abnormal_items", local_context)
                 return self.risk_runtime.summarize_risk(local_context) + "\n" + self.risk_runtime.summarize_triggers(local_context) + "\n" + self.risk_runtime.summarize_abnormal_items(local_context)
+            if runtime is not None:
+                return runtime.summarize("summarize_risk", serialized) + "\n" + runtime.summarize("summarize_triggers", serialized)
             return self.risk_runtime.summarize_risk(serialized) + "\n" + self.risk_runtime.summarize_triggers(serialized)
-        if route_name == "lifestyle_coach": return self.lifestyle_runtime.answer_food_question(question, serialized)
-        if route_name == "medication_followup": return self.medication_runtime.summarize_medication_and_reminders(serialized)
+        if route_name == "lifestyle_coach":
+            return runtime.summarize("answer_food_question", question, serialized) if runtime is not None else self.lifestyle_runtime.answer_food_question(question, serialized)
+        if route_name == "medication_followup":
+            return runtime.summarize("summarize_medication_and_reminders", serialized) if runtime is not None else self.medication_runtime.summarize_medication_and_reminders(serialized)
         if route_name == "reporting":
-            return self.reporting_runtime.explain_report(
+            return (runtime.summarize("explain_report",
                 observations.get("生成周报")
                 or observations.get("生成月报")
                 or self._call_skill_tool("reporting", "生成周报", context.profile, context.logs, context.labs, context.attacks, context.symptom_logs),
                 serialized,
-            )
-        return self.risk_runtime.summarize_risk(serialized) + "\n" + self.lifestyle_runtime.build_daily_lifestyle_guidance(serialized)
+            ) if runtime is not None else self.reporting_runtime.explain_report(
+                observations.get("生成周报")
+                or observations.get("生成月报")
+                or self._call_skill_tool("reporting", "生成周报", context.profile, context.logs, context.labs, context.attacks, context.symptom_logs),
+                serialized,
+            ))
+        risk_runtime = self._get_skill_runtime("risk_assessment")
+        lifestyle_runtime = self._get_skill_runtime("lifestyle_coach")
+        risk_text = risk_runtime.summarize("summarize_risk", serialized) if risk_runtime is not None else self.risk_runtime.summarize_risk(serialized)
+        guide_text = lifestyle_runtime.summarize("build_daily_lifestyle_guidance", serialized) if lifestyle_runtime is not None else self.lifestyle_runtime.build_daily_lifestyle_guidance(serialized)
+        return risk_text + "\n" + guide_text
 
     def _route_question(self, question: str) -> tuple[str, dict[str, Any]]:
         match = self.skill_registry.match_question(question)
-        if match and match["score"] > 0: return match["route_name"], {"source": "skill_registry", "matched_hints": match["matched_hints"], "score": match["score"], "skill_name": match["name"], "allowed_tools": match["allowed_tools"], "execution_tools": match["execution_tools"]}
+        if match and match["score"] > 0: return match["route_name"], {"source": "skill_registry", "matched_hints": match["matched_hints"], "score": match["score"], "skill_name": match["name"], "allowed_tools": match["allowed_tools"], "execution_tools": match["execution_tools"], "write_permissions": match.get("write_permissions", [])}
         route_name = self._legacy_route_question(question)
-        return route_name, {"source": "fallback_rules", "matched_hints": ROUTE_FALLBACKS.get(route_name, []), "score": 0, "skill_name": route_name, "allowed_tools": self.get_allowed_tools(route_name), "execution_tools": self.skill_registry.get_execution_tools(route_name)}
+        skill = self.skill_registry.get_by_route(route_name)
+        return route_name, {"source": "fallback_rules", "matched_hints": ROUTE_FALLBACKS.get(route_name, []), "score": 0, "skill_name": route_name, "allowed_tools": self.get_allowed_tools(route_name), "execution_tools": self.skill_registry.get_execution_tools(route_name), "write_permissions": list(skill.write_permissions) if skill else []}
 
     def _legacy_route_question(self, question: str) -> str:
         lower = question.lower()

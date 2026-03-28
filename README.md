@@ -1,64 +1,61 @@
-# AI 痛风管理助手
+# AI Gout Management Agent
 
-这是一个面向痛风与高尿酸血症长期管理场景的本地优先应用，核心目标是帮助用户完成日常记录、风险预警、个性化建议和长期陪伴管理。
+一款以**痛风健康分身**为核心的本地智能应用，采用 **harness engineering** 设计哲学构建：不把能力全部压在模型本身，而是通过统一 Agent Runtime、Skill 协议、Tool 边界、外置状态、权限与后台任务，为模型提供一个稳定、可解释、可恢复的运行环境。
 
 ## 当前能力
 
-- 本地 SQLite 数据存储
-- 用户资料与长期画像管理
-- 日常记录、发作记录、用药记录
-- 可选高级化验录入
-- 基于规则引擎的风险评估、诱因识别与异常提醒
-- 周报、月报生成与解读
-- 本地大模型问答与报告解释
-- Skill 驱动的 Agent 编排
-- LangGraph 多步执行与回退
+- 健康分身：部位热力图、近期行为、个人痛风模式
+- 风险概览：当前风险、变化原因、今天怎么做
+- 数据记录：日常行为、疼痛记录、服药记录
+- 报告中心：周报 / 月报生成，化验报告上传与 AI 解读
+- 智能问答助手：基于全局记录、健康分身和历史状态进行问答
+- 本地多用户：注册、登录、密码哈希、账号注销
+- 后台任务：报告生成、化验报告识别、健康分身重算
+- 敏感写审计：对高风险写操作进行确认与审计落盘
+
+## 技术架构
+
+当前项目采用：
+
+- `Streamlit`：前台交互
+- `SQLite`：本地持久化与迁移
+- `LangGraph`：执行图与主控流程
+- `Skill + Tool`：任务协议与环境能力边界
+- `本地大模型`：问答、报告解读、化验辅助解析
+
+更完整的分层架构图和文件对应关系见：
+
+- [ARCHITECTURE.md](/d:/ai-gout-management-agent/ARCHITECTURE.md)
 
 ## 主要目录
 
-- `streamlit_app.py`：Streamlit 入口
-- `src/gout_agent/ui.py`：中文界面
-- `src/gout_agent/data.py`：SQLite 数据层
-- `src/gout_agent/risk.py`：风险评估与诱因识别
-- `src/gout_agent/reporting.py`：报告生成与导出
-- `src/gout_agent/memory.py`：长期记忆与行为画像
-- `src/gout_agent/llm.py`：本地模型适配
-- `src/gout_agent/skill_registry.py`：`SKILL.md` 解析与技能注册
-- `src/gout_agent/skills/`：运行时技能实现
-- `skills/`：给模型读取的 `SKILL.md` 技能目录
-- `tests/`：自动化测试
+- `streamlit_app.py`
+- `src/gout_agent/ui.py`
+- `src/gout_agent/data.py`
+- `src/gout_agent/memory.py`
+- `src/gout_agent/risk.py`
+- `src/gout_agent/reporting.py`
+- `src/gout_agent/llm.py`
+- `src/gout_agent/skill_registry.py`
+- `src/gout_agent/skills/orchestrator.py`
+- `skills/`
+- `tests/`
 
-## 启动应用
+## 本地启动
 
-```bash
+```powershell
 python -m pip install -r requirements.txt
 python -m streamlit run streamlit_app.py
 ```
 
-Windows 本地也可以直接使用：
-
-- `run_local.bat`
-
-## 本地存储
-
-- SQLite 数据库：`data/gout_management.db`
-- 报告导出目录：`reports/`
-
-## 本地模型配置
-
-项目默认面向本地 OpenAI-compatible 接口，例如 `LM Studio`：
+Windows 下也可以直接运行：
 
 ```powershell
-$env:LOCAL_LLM_BASE_URL = "http://127.0.0.1:1234/v1"
-$env:LOCAL_LLM_API_KEY = "lm-studio"
-$env:LOCAL_LLM_MODEL = "FreedomIntelligence/HuatuoGPT-o1-7B"
-$env:LOCAL_LLM_TIMEOUT_SECONDS = "60"
+.\run_local.bat
 ```
-
-如果本地模型可用，`AI 管理助手` 页面会优先结合模型回答；如果模型不可用或超时，系统会自动回退到规则引擎。
 
 ## 说明
 
-- 本项目用于健康管理与教育，不用于诊断。
-- 风险逻辑以规则引擎为安全基线。
-- 本地大模型主要负责解释、问答和陪伴式建议，不替代医生判断。
+- 本项目用于健康管理和教育，不替代医生诊断
+- 风险判断以规则引擎为基础，模型主要负责解释与交互
+- 当前支持本地模型与规则回退协同运行

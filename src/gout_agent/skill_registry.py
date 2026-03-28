@@ -28,7 +28,9 @@ class SkillSpec:
     route_hints: list[str] = field(default_factory=list)
     execution_steps: list[str] = field(default_factory=list)
     execution_tools: list[str] = field(default_factory=list)
+    when_to_use: str = ""
     decision_prompt: str = ""
+    write_permissions: list[str] = field(default_factory=list)
 
 
 class SkillRegistry:
@@ -81,6 +83,7 @@ class SkillRegistry:
                 "matched_hints": matched_hints[:6],
                 "allowed_tools": list(skill.recommended_tools),
                 "execution_tools": list(skill.execution_tools),
+                "write_permissions": list(skill.write_permissions),
             }
             if best_match is None or candidate["score"] > best_match["score"]:
                 best_match = candidate
@@ -117,6 +120,7 @@ def parse_skill_file(skill_file: Path, skills_root: Path) -> SkillSpec:
     execution_steps = _parse_execution_steps(sections)
     execution_tools = _infer_execution_tools(recommended_tools, execution_steps)
     route_hints = _build_route_hints(name, description, recommended_tools, sections)
+    when_to_use = sections.get("何时使用", "").strip()
     return SkillSpec(
         name=name,
         route_name=route_name,
@@ -129,7 +133,9 @@ def parse_skill_file(skill_file: Path, skills_root: Path) -> SkillSpec:
         route_hints=route_hints,
         execution_steps=execution_steps,
         execution_tools=execution_tools,
+        when_to_use=when_to_use,
         decision_prompt=sections.get("决策提示词", "").strip(),
+        write_permissions=_infer_write_permissions(recommended_tools),
     )
 
 
@@ -221,6 +227,14 @@ def _infer_execution_tools(recommended_tools: list[str], execution_steps: list[s
     return ordered_tools
 
 
+def _infer_write_permissions(recommended_tools: list[str]) -> list[str]:
+    return [
+        tool_name
+        for tool_name in recommended_tools
+        if any(token in tool_name for token in ("记录", "更新", "保存", "创建", "添加", "导出"))
+    ]
+
+
 def _as_string_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -238,6 +252,7 @@ def _infer_route_name(name: str) -> str:
         "lifestyle-coach-skill": "lifestyle_coach",
         "medication-followup-skill": "medication_followup",
         "report-explanation-skill": "reporting",
+        "lab-report-skill": "lab_report",
     }
     return mapping.get(name, name.replace("-skill", "").replace("-", "_"))
 
@@ -269,7 +284,7 @@ def _extract_hints(text: str) -> list[str]:
         if not line:
             continue
         line = re.sub(r"^[\-\d\.\s]+", "", line)
-        line = line.strip("，。！？（）()[]【】:")
+        line = line.strip("，。！：；（）()[]【】")
         if len(line) >= 2:
             hints.append(line)
         for token in re.findall(r"[A-Za-z_][A-Za-z0-9_-]*|[\u4e00-\u9fff]{2,}", line):
@@ -310,7 +325,7 @@ def _score_skill(skill: SkillSpec, normalized_question: str) -> tuple[int, list[
 
     for tool_name in skill.recommended_tools:
         simplified = tool_name
-        for prefix in ("获取", "记录", "生成", "保存", "更新", "创建", "调用"):
+        for prefix in ("获取", "记录", "生成", "保存", "更新", "创建", "调用", "导出", "识别", "解析"):
             simplified = simplified.replace(prefix, "")
         normalized_tool = _normalize_text(simplified)
         if len(normalized_tool) >= 2 and normalized_tool in normalized_question:
