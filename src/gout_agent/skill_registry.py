@@ -253,6 +253,7 @@ def _infer_route_name(name: str) -> str:
         "medication-followup-skill": "medication_followup",
         "report-explanation-skill": "reporting",
         "lab-report-skill": "lab_report",
+        "care-plan-skill": "care_plan",
     }
     return mapping.get(name, name.replace("-skill", "").replace("-", "_"))
 

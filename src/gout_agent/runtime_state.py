@@ -19,6 +19,17 @@ def build_twin_state(long_term_memory: dict[str, Any], risk_overview: dict[str, 
             "overall_risk_score": risk_overview.get("overall_risk_score"),
             "trigger_summary": risk_overview.get("trigger_summary") or [],
         },
+        "risk_view": {
+            "attack_risk_label": risk_overview.get("attack_risk_label"),
+            "overall_risk_score": risk_overview.get("overall_risk_score"),
+            "explanation": risk_overview.get("explanation"),
+            "hydration_advice": risk_overview.get("hydration_advice"),
+            "diet_advice": risk_overview.get("diet_advice"),
+            "exercise_advice": risk_overview.get("exercise_advice"),
+            "behavior_goal": risk_overview.get("behavior_goal"),
+            "trigger_summary": risk_overview.get("trigger_summary") or [],
+            "abnormal_items": risk_overview.get("abnormal_items") or [],
+        },
     }
 
 

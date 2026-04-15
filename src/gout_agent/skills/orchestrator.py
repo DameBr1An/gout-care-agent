@@ -9,7 +9,7 @@ from typing import TypedDict
 import pandas as pd
 from langgraph.graph import END, START, StateGraph
 
-from gout_agent import data, llm, memory, runtime_fallbacks, runtime_jobs, runtime_state, runtime_tools
+from gout_agent import data, llm, memory, runtime_fallbacks, runtime_jobs, runtime_state, runtime_taskflow, runtime_tools
 from gout_agent.skill_registry import SkillRegistry, load_skill_registry
 from gout_agent.skills._runtime_loader import load_runtime_module
 from gout_agent.toolkit import ToolRegistry, build_default_tool_registry, serialize_tool_result
@@ -80,6 +80,7 @@ class AppOrchestrator:
         self.medication_runtime = load_runtime_module("medication-followup-skill")
         self.reporting_runtime = load_runtime_module("report-explanation-skill")
         self.lab_report_runtime = load_runtime_module("lab-report-skill")
+        self.care_plan_runtime = load_runtime_module("care-plan-skill")
         self.risk_runtime = load_runtime_module("risk-assessment-skill")
         self.skill_runtimes = {
             "intake": self.intake_runtime,
@@ -89,6 +90,7 @@ class AppOrchestrator:
             "medication_followup": self.medication_runtime,
             "reporting": self.reporting_runtime,
             "lab_report": self.lab_report_runtime,
+            "care_plan": self.care_plan_runtime,
         }
         self.agent_graph = self._build_agent_graph()
         self.preview_graph = self._build_agent_graph(dry_run=True)
@@ -495,6 +497,150 @@ class AppOrchestrator:
         parsed_lab_reports = runtime.run("parse_uploaded_lab_files", uploaded_files, self._extract_lab_metrics_with_local_model) if runtime is not None else self.lab_report_runtime.parse_uploaded_lab_files(uploaded_files, self._extract_lab_metrics_with_local_model)
         return self.explain_parsed_lab_reports(parsed_lab_reports, context, uploaded_files=uploaded_files)
 
+    def generate_care_plan(self, horizon_days: int, context: AppContext) -> dict[str, Any]:
+        runtime = self._get_skill_runtime("care_plan")
+        llm_context = self._build_interpretation_context(context)
+        llm_context.update(
+            {
+                "plan_horizon_days": horizon_days,
+                "site_history": context.site_history.head(20).to_dict(orient="records") if not context.site_history.empty else [],
+                "current_risk_overview": context.risk_overview,
+            }
+        )
+        if runtime is not None:
+            llm_context = runtime.prepare(llm_context, horizon_days=horizon_days, twin_state=context.twin_state)
+            plan_payload = runtime.run("build_care_plan", llm_context, horizon_days=horizon_days)
+            plan_summary = runtime.summarize("summarize_care_plan", plan_payload)
+        else:
+            plan_payload = {"summary": "计划生成能力暂不可用。", "horizon_days": horizon_days}
+            plan_summary = plan_payload["summary"]
+        plan_payload.setdefault("summary", plan_summary)
+        return plan_payload
+
+    def list_care_plan_runs(self, status: str | None = None, plan_type: str | None = None, limit: int = 10) -> pd.DataFrame:
+        return data.get_care_plan_runs(
+            self.project_root,
+            status=status,
+            plan_type=plan_type,
+            limit=limit,
+            user_id=self.user_id,
+        )
+
+    def get_latest_care_plan_run(self, status: str | None = None, plan_type: str | None = None) -> dict[str, Any] | None:
+        return data.get_latest_care_plan_run(
+            self.project_root,
+            status=status,
+            plan_type=plan_type,
+            user_id=self.user_id,
+        )
+
+    def evaluate_care_plan_run(self, run_id: int) -> dict[str, Any] | None:
+        runs = self.list_care_plan_runs(limit=50)
+        if runs.empty:
+            return None
+        matched = runs.loc[runs["id"] == run_id]
+        if matched.empty:
+            return None
+        run_record = matched.iloc[0].to_dict()
+        plan_payload = run_record.get("plan_payload") or {}
+        runtime = self._get_skill_runtime("care_plan")
+        if runtime is None or not isinstance(plan_payload, dict):
+            return None
+        context = self.load_context()
+        llm_context = self._build_interpretation_context(context)
+        llm_context.update(
+            {
+                "current_risk_overview": context.risk_overview,
+                "site_history": context.site_history.head(20).to_dict(orient="records") if not context.site_history.empty else [],
+            }
+        )
+        evaluated_payload = runtime.run("evaluate_care_plan", plan_payload, llm_context)
+        now = pd.Timestamp.now().isoformat()
+        data.update_care_plan_run(
+            self.project_root,
+            run_id,
+            plan_payload=evaluated_payload,
+            status=str(evaluated_payload.get("status") or "active"),
+            last_checked_at=now,
+            completed_at=now if evaluated_payload.get("status") == "completed" else None,
+        )
+        return data.get_latest_care_plan_run(
+            self.project_root,
+            status=None,
+            plan_type=str(run_record.get("plan_type") or ""),
+            user_id=self.user_id,
+        )
+
+    def update_care_plan_step(self, run_id: int, step_id: str, *, done: bool | None = None, failed: bool = False) -> dict[str, Any] | None:
+        runs = self.list_care_plan_runs(limit=50)
+        if runs.empty:
+            return None
+        matched = runs.loc[runs["id"] == run_id]
+        if matched.empty:
+            return None
+        run_record = matched.iloc[0].to_dict()
+        plan_payload = dict(run_record.get("plan_payload") or {})
+        steps = [dict(step) for step in (plan_payload.get("steps") or [])]
+        changed = False
+        for step in steps:
+            if str(step.get("id")) != str(step_id):
+                continue
+            if failed:
+                step["status"] = "failed"
+                step["completion_source"] = "manual"
+            elif done is not None:
+                step["status"] = "done" if done else "pending"
+                step["completion_source"] = "manual" if done else None
+            changed = True
+            break
+        if not changed:
+            return None
+        plan_payload["steps"] = steps
+        runtime = self._get_skill_runtime("care_plan")
+        context = self.load_context()
+        llm_context = self._build_interpretation_context(context)
+        llm_context.update(
+            {
+                "current_risk_overview": context.risk_overview,
+                "site_history": context.site_history.head(20).to_dict(orient="records") if not context.site_history.empty else [],
+            }
+        )
+        if runtime is not None:
+            plan_payload = runtime.run("evaluate_care_plan", plan_payload, llm_context)
+        now = pd.Timestamp.now().isoformat()
+        data.update_care_plan_run(
+            self.project_root,
+            run_id,
+            plan_payload=plan_payload,
+            status=str(plan_payload.get("status") or "active"),
+            last_checked_at=now,
+            completed_at=now if plan_payload.get("status") == "completed" else None,
+        )
+        return data.get_latest_care_plan_run(
+            self.project_root,
+            status=None,
+            plan_type=str(run_record.get("plan_type") or ""),
+            user_id=self.user_id,
+        )
+
+    def replan_care_plan(self, run_id: int) -> int | None:
+        runs = self.list_care_plan_runs(limit=50)
+        if runs.empty:
+            return None
+        matched = runs.loc[runs["id"] == run_id]
+        if matched.empty:
+            return None
+        run_record = matched.iloc[0].to_dict()
+        plan_payload = run_record.get("plan_payload") or {}
+        return self.submit_background_job(
+            "care_plan_replan",
+            {
+                "horizon_days": int(run_record.get("horizon_days") or 7),
+                "previous_run_id": int(run_id),
+                "reason": str(plan_payload.get("replan_reason") or "manual_replan"),
+            },
+        )
+
     def explain_parsed_lab_reports(
         self,
         parsed_lab_reports: dict[str, Any],
@@ -530,9 +676,26 @@ class AppOrchestrator:
     def list_background_jobs(self, status: str | None = None, limit: int = 20) -> pd.DataFrame:
         return data.get_background_jobs(self.project_root, status=status, limit=limit, user_id=self.user_id)
 
+    def get_background_job(self, job_id: int) -> dict[str, Any] | None:
+        return data.get_background_job_by_id(self.project_root, job_id, user_id=self.user_id)
+
     def submit_background_job(self, job_type: str, payload: dict[str, Any] | None = None) -> int:
         payload = payload or {}
         return data.create_background_job(self.project_root, job_type, payload, user_id=self.user_id)
+
+    def rerun_background_job(self, job_id: int) -> int | None:
+        job = self.get_background_job(job_id)
+        if not job:
+            return None
+        payload = dict(job.get("payload") or {})
+        return self.submit_background_job(str(job.get("job_type") or ""), payload)
+
+    def retry_background_job(self, job_id: int) -> int | None:
+        job = self.get_background_job(job_id)
+        if not job or str(job.get("status") or "") != "failed":
+            return None
+        payload = dict(job.get("payload") or {})
+        return self.submit_background_job(str(job.get("job_type") or ""), payload)
 
     def run_pending_background_jobs(self, limit: int = 5) -> list[dict[str, Any]]:
         jobs = data.get_pending_background_jobs(self.project_root, limit=limit, user_id=self.user_id)
@@ -592,16 +755,25 @@ class AppOrchestrator:
         return [tool for tool in execution_tools if tool in allowed_tools]
 
     def save_daily_log(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录日常健康", payload, _audit_meta=audit_meta)["result"]
+    def save_daily_log_with_flow(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> dict[str, Any]: return self._run_write_action("intake", "记录日常健康", payload, _audit_meta=audit_meta)
     def save_joint_symptom(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录部位症状", payload, _audit_meta=audit_meta)["result"]
+    def save_joint_symptom_with_flow(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> dict[str, Any]: return self._run_write_action("intake", "记录部位症状", payload, _audit_meta=audit_meta)
     def save_lab_result(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录化验结果", payload, _audit_meta=audit_meta)["result"]
     def update_profile(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any:
         if "获取用户档案" in self.build_execution_plan("profile", intent="update"): self._call_skill_tool("profile", "获取用户档案")
         return self._run_write_action("profile", "更新用户档案", payload, _audit_meta=audit_meta)["result"]
+    def update_profile_with_flow(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        if "获取用户档案" in self.build_execution_plan("profile", intent="update"):
+            self._call_skill_tool("profile", "获取用户档案")
+        return self._run_write_action("profile", "更新用户档案", payload, _audit_meta=audit_meta)
     def get_profile(self) -> Any: return self._call_skill_tool("profile", (self.build_execution_plan("profile", intent="read") or ["获取用户档案"])[0])
     def save_attack(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("intake", "记录痛风发作", payload, _audit_meta=audit_meta)["result"]
+    def save_attack_with_flow(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> dict[str, Any]: return self._run_write_action("intake", "记录痛风发作", payload, _audit_meta=audit_meta)
     def add_medication(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("medication_followup", "添加药物方案", payload, _audit_meta=audit_meta)["result"]
+    def add_medication_with_flow(self, payload: dict[str, Any], audit_meta: dict[str, Any] | None = None) -> dict[str, Any]: return self._run_write_action("medication_followup", "添加药物方案", payload, _audit_meta=audit_meta)
     def create_reminder(self, reminder_type: str, title: str, schedule_rule: str, next_trigger_at: str, audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("medication_followup", "创建提醒", reminder_type, title, schedule_rule, next_trigger_at, _audit_meta=audit_meta)["result"]
     def log_medication_taken(self, medication_id: int, status: str, taken_time: str | None = None, audit_meta: dict[str, Any] | None = None) -> Any: return self._run_write_action("medication_followup", "记录服药情况", medication_id, status, None, taken_time, _audit_meta=audit_meta)["result"]
+    def log_medication_taken_with_flow(self, medication_id: int, status: str, taken_time: str | None = None, audit_meta: dict[str, Any] | None = None) -> dict[str, Any]: return self._run_write_action("medication_followup", "记录服药情况", medication_id, status, None, taken_time, _audit_meta=audit_meta)
     def get_write_audit_logs(self, limit: int = 50) -> pd.DataFrame:
         return data.get_write_audit_logs(self.project_root, limit=limit, user_id=self.user_id)
 
@@ -655,7 +827,19 @@ class AppOrchestrator:
                 user_id=self.user_id,
             )
         refreshed_context = self._refresh_context_state()
-        return {"result": result, "context": refreshed_context, "ui_snapshot": self.get_ui_snapshot(refreshed_context)}
+        next_action = runtime_taskflow.build_context_next_action(refreshed_context)
+        write_flow = runtime_taskflow.build_write_task_flow(tool_name)
+        risk_flow = runtime_taskflow.build_risk_refresh_task_flow(refreshed_context, next_action=next_action)
+        return {
+            "result": result,
+            "context": refreshed_context,
+            "ui_snapshot": self.get_ui_snapshot(refreshed_context),
+            "task_flow": runtime_taskflow.merge_task_flows(
+                f"{write_flow.get('title') or '写入任务'}与风险刷新",
+                [write_flow, risk_flow],
+                next_action=next_action,
+            ),
+        }
 
     def _refresh_context_state(self) -> AppContext:
         refreshed_context = self.load_context()
@@ -670,6 +854,7 @@ class AppOrchestrator:
             payload,
             load_context=self.load_context,
             explain_report=self.explain_report,
+            generate_care_plan=self.generate_care_plan,
             refresh_context_state=self._refresh_context_state,
             get_skill_runtime=self._get_skill_runtime,
             extract_lab_metrics_with_local_model=self._extract_lab_metrics_with_local_model,

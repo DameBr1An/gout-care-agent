@@ -14,7 +14,7 @@ from typing import Any
 import pandas as pd
 
 DATABASE_NAME = "gout_management.db"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 DEFAULT_USER_ID = 1
 DEFAULT_DEMO_USERNAME = "demo"
 DEFAULT_DEMO_PASSWORD = "demo123"
@@ -308,6 +308,32 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS care_plan_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        plan_type TEXT NOT NULL,
+        horizon_days INTEGER NOT NULL,
+        summary_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS care_plan_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        plan_type TEXT NOT NULL,
+        horizon_days INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        plan_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_checked_at TEXT,
+        completed_at TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS write_audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -341,6 +367,8 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_report_summaries_user_type_created ON report_summaries(user_id, report_type, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_lab_report_parse_results_user_created ON lab_report_parse_results(user_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_background_jobs_user_status_created ON background_jobs(user_id, status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_care_plan_summaries_user_type_created ON care_plan_summaries(user_id, plan_type, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_care_plan_runs_user_status_updated ON care_plan_runs(user_id, status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_write_audit_logs_user_created ON write_audit_logs(user_id, created_at)",
 ]
 
@@ -436,11 +464,27 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    for statement in SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    for statement in INDEX_STATEMENTS:
+        conn.execute(statement)
+
+
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    for statement in SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    for statement in INDEX_STATEMENTS:
+        conn.execute(statement)
+
+
 MIGRATIONS: dict[int, Any] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
+    6: _migrate_to_v6,
 }
 
 
@@ -1601,8 +1645,203 @@ def get_background_jobs(
     return frame
 
 
+def get_background_job_by_id(root: Path, job_id: int, user_id: int = DEFAULT_USER_ID) -> dict[str, Any] | None:
+    init_db(root)
+    with get_connection(root) as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM background_jobs
+            WHERE id = ? AND user_id = ?
+            """,
+            (job_id, user_id),
+        ).fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["payload"] = json.loads(payload.get("payload_json") or "{}")
+    payload["result_payload"] = json.loads(payload.get("result_json") or "{}") if payload.get("result_json") else {}
+    return payload
+
+
 def get_pending_background_jobs(root: Path, limit: int = 10, user_id: int = DEFAULT_USER_ID) -> pd.DataFrame:
     return get_background_jobs(root, status="queued", limit=limit, user_id=user_id)
+
+
+def save_care_plan_summary(
+    root: Path,
+    plan_type: str,
+    horizon_days: int,
+    payload: dict[str, Any],
+    user_id: int = DEFAULT_USER_ID,
+) -> int:
+    init_db(root)
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection(root) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO care_plan_summaries (user_id, plan_type, horizon_days, summary_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, plan_type, horizon_days, json.dumps(_json_ready(payload), ensure_ascii=False), now),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def get_care_plan_summaries(
+    root: Path,
+    plan_type: str | None = None,
+    limit: int = 10,
+    user_id: int = DEFAULT_USER_ID,
+) -> pd.DataFrame:
+    init_db(root)
+    query = "SELECT * FROM care_plan_summaries WHERE user_id = ?"
+    params: list[Any] = [user_id]
+    if plan_type:
+        query += " AND plan_type = ?"
+        params.append(plan_type)
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(max(limit, 1))
+    with get_connection(root) as conn:
+        frame = _frame_from_query(conn, query, tuple(params))
+    if "summary_json" in frame.columns:
+        frame["summary_payload"] = frame["summary_json"].map(lambda value: json.loads(value) if value else {})
+    return frame
+
+
+def create_care_plan_run(
+    root: Path,
+    plan_type: str,
+    horizon_days: int,
+    payload: dict[str, Any],
+    *,
+    status: str = "active",
+    user_id: int = DEFAULT_USER_ID,
+) -> int:
+    init_db(root)
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection(root) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO care_plan_runs (
+                user_id, plan_type, horizon_days, status, plan_json,
+                created_at, updated_at, last_checked_at, completed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            """,
+            (
+                user_id,
+                plan_type,
+                horizon_days,
+                status,
+                json.dumps(_json_ready(payload), ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def update_care_plan_run(
+    root: Path,
+    run_id: int,
+    *,
+    plan_payload: dict[str, Any] | None = None,
+    status: str | None = None,
+    last_checked_at: str | None = None,
+    completed_at: str | None = None,
+) -> None:
+    init_db(root)
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection(root) as conn:
+        current = conn.execute(
+            "SELECT plan_json, status, last_checked_at, completed_at FROM care_plan_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if current is None:
+            return
+        conn.execute(
+            """
+            UPDATE care_plan_runs
+            SET plan_json = ?,
+                status = ?,
+                updated_at = ?,
+                last_checked_at = ?,
+                completed_at = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(_json_ready(plan_payload), ensure_ascii=False) if plan_payload is not None else current["plan_json"],
+                status or current["status"],
+                now,
+                last_checked_at if last_checked_at is not None else current["last_checked_at"],
+                completed_at if completed_at is not None else current["completed_at"],
+                run_id,
+            ),
+        )
+        conn.commit()
+
+
+def get_care_plan_runs(
+    root: Path,
+    *,
+    status: str | None = None,
+    plan_type: str | None = None,
+    limit: int = 10,
+    user_id: int = DEFAULT_USER_ID,
+) -> pd.DataFrame:
+    init_db(root)
+    query = "SELECT * FROM care_plan_runs WHERE user_id = ?"
+    params: list[Any] = [user_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    if plan_type:
+        query += " AND plan_type = ?"
+        params.append(plan_type)
+    query += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+    params.append(max(limit, 1))
+    with get_connection(root) as conn:
+        frame = _frame_from_query(conn, query, tuple(params))
+    if "plan_json" in frame.columns:
+        frame["plan_payload"] = frame["plan_json"].map(lambda value: json.loads(value) if value else {})
+    return frame
+
+
+def get_latest_care_plan_run(
+    root: Path,
+    *,
+    status: str | None = None,
+    plan_type: str | None = None,
+    user_id: int = DEFAULT_USER_ID,
+) -> dict[str, Any] | None:
+    frame = get_care_plan_runs(root, status=status, plan_type=plan_type, limit=1, user_id=user_id)
+    if frame.empty:
+        return None
+    row = frame.iloc[0].to_dict()
+    payload = row.get("plan_payload")
+    row["plan_payload"] = payload if isinstance(payload, dict) else {}
+    return row
+
+
+def get_care_plan_run_by_id(root: Path, run_id: int, user_id: int = DEFAULT_USER_ID) -> dict[str, Any] | None:
+    init_db(root)
+    with get_connection(root) as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM care_plan_runs
+            WHERE id = ? AND user_id = ?
+            """,
+            (run_id, user_id),
+        ).fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["plan_payload"] = json.loads(payload.get("plan_json") or "{}")
+    return payload
 
 
 def log_write_audit(

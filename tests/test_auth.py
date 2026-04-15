@@ -135,6 +135,8 @@ class AuthTests(unittest.TestCase):
             account_columns = [row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()]
             symptom_columns = [row[1] for row in conn.execute("PRAGMA table_info(joint_symptom_logs)").fetchall()]
             background_job_columns = [row[1] for row in conn.execute("PRAGMA table_info(background_jobs)").fetchall()]
+            care_plan_columns = [row[1] for row in conn.execute("PRAGMA table_info(care_plan_summaries)").fetchall()]
+            care_plan_run_columns = [row[1] for row in conn.execute("PRAGMA table_info(care_plan_runs)").fetchall()]
             write_audit_columns = [row[1] for row in conn.execute("PRAGMA table_info(write_audit_logs)").fetchall()]
             user_version = conn.execute("PRAGMA user_version").fetchone()[0]
 
@@ -142,6 +144,9 @@ class AuthTests(unittest.TestCase):
         self.assertIn("last_login_at", account_columns)
         self.assertIn("stiffness_flag", symptom_columns)
         self.assertIn("status", background_job_columns)
+        self.assertIn("plan_type", care_plan_columns)
+        self.assertIn("status", care_plan_run_columns)
+        self.assertIn("plan_json", care_plan_run_columns)
         self.assertIn("confirmed_flag", write_audit_columns)
         self.assertEqual(user_version, data.SCHEMA_VERSION)
 

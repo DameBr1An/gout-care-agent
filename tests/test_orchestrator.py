@@ -207,6 +207,93 @@ class OrchestratorTests(unittest.TestCase):
         parse_results = data.get_lab_report_parse_results(self.temp_root, user_id=orchestrator.user_id)
         self.assertFalse(parse_results.empty)
 
+    def test_background_care_plan_job_can_run_and_persist_summary(self) -> None:
+        orchestrator = self._build_orchestrator()
+        job_id = orchestrator.submit_background_job("care_plan_generation", {"horizon_days": 7})
+        results = orchestrator.run_pending_background_jobs(limit=5)
+        self.assertTrue(any(item["job_id"] == job_id and item["status"] == "completed" for item in results))
+        plan_summaries = data.get_care_plan_summaries(self.temp_root, plan_type="7d", user_id=orchestrator.user_id)
+        self.assertFalse(plan_summaries.empty)
+        payload = plan_summaries.iloc[0].get("summary_payload") or {}
+        self.assertIn("summary", payload)
+        self.assertIn("today_actions", payload)
+        runs = data.get_care_plan_runs(self.temp_root, plan_type="7d", user_id=orchestrator.user_id)
+        self.assertFalse(runs.empty)
+        run_payload = runs.iloc[0].get("plan_payload") or {}
+        self.assertIn("steps", run_payload)
+        self.assertIn("progress", run_payload)
+
+    def test_care_plan_run_can_be_evaluated_and_step_marked(self) -> None:
+        orchestrator = self._build_orchestrator()
+        job_id = orchestrator.submit_background_job("care_plan_generation", {"horizon_days": 7})
+        orchestrator.run_pending_background_jobs(limit=5)
+        self.assertIsNotNone(job_id)
+        latest_run = orchestrator.get_latest_care_plan_run(plan_type="7d")
+        self.assertIsNotNone(latest_run)
+        assert latest_run is not None
+        evaluated = orchestrator.evaluate_care_plan_run(int(latest_run["id"]))
+        self.assertIsNotNone(evaluated)
+        assert evaluated is not None
+        steps = (evaluated.get("plan_payload") or {}).get("steps") or []
+        self.assertTrue(steps)
+        updated = orchestrator.update_care_plan_step(int(latest_run["id"]), str(steps[0]["id"]), done=True)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        updated_steps = (updated.get("plan_payload") or {}).get("steps") or []
+        self.assertEqual(updated_steps[0]["status"], "done")
+
+    def test_care_plan_replan_job_can_archive_previous_run(self) -> None:
+        orchestrator = self._build_orchestrator()
+        orchestrator.submit_background_job("care_plan_generation", {"horizon_days": 30})
+        orchestrator.run_pending_background_jobs(limit=5)
+        latest_run = orchestrator.get_latest_care_plan_run(plan_type="30d")
+        self.assertIsNotNone(latest_run)
+        assert latest_run is not None
+        replan_job_id = orchestrator.replan_care_plan(int(latest_run["id"]))
+        self.assertIsNotNone(replan_job_id)
+        results = orchestrator.run_pending_background_jobs(limit=5)
+        self.assertTrue(any(item["job_id"] == replan_job_id and item["status"] == "completed" for item in results))
+        archived_runs = data.get_care_plan_runs(self.temp_root, status="archived", plan_type="30d", user_id=orchestrator.user_id)
+        self.assertFalse(archived_runs.empty)
+
+    def test_care_plan_replan_inherits_completed_steps(self) -> None:
+        orchestrator = self._build_orchestrator()
+        orchestrator.submit_background_job("care_plan_generation", {"horizon_days": 7})
+        orchestrator.run_pending_background_jobs(limit=5)
+        latest_run = orchestrator.get_latest_care_plan_run(plan_type="7d")
+        self.assertIsNotNone(latest_run)
+        assert latest_run is not None
+        steps = (latest_run.get("plan_payload") or {}).get("steps") or []
+        self.assertTrue(steps)
+        step_id = str(steps[0]["id"])
+        updated = orchestrator.update_care_plan_step(int(latest_run["id"]), step_id, done=True)
+        self.assertIsNotNone(updated)
+        replan_job_id = orchestrator.replan_care_plan(int(latest_run["id"]))
+        self.assertIsNotNone(replan_job_id)
+        orchestrator.run_pending_background_jobs(limit=5)
+        replanned_run = orchestrator.get_latest_care_plan_run(plan_type="7d")
+        self.assertIsNotNone(replanned_run)
+        assert replanned_run is not None
+        replanned_steps = (replanned_run.get("plan_payload") or {}).get("steps") or []
+        inherited_step = next((step for step in replanned_steps if str(step.get("id")) == step_id), None)
+        self.assertIsNotNone(inherited_step)
+        assert inherited_step is not None
+        self.assertEqual(inherited_step.get("status"), "done")
+
+    def test_failed_background_job_can_be_retried(self) -> None:
+        orchestrator = self._build_orchestrator()
+        job_id = orchestrator.submit_background_job("unknown_job_type", {})
+        results = orchestrator.run_pending_background_jobs(limit=5)
+        self.assertTrue(any(item["job_id"] == job_id and item["status"] == "failed" for item in results))
+        retry_job_id = orchestrator.retry_background_job(job_id)
+        self.assertIsNotNone(retry_job_id)
+        assert retry_job_id is not None
+        retry_job = data.get_background_job_by_id(self.temp_root, retry_job_id, user_id=orchestrator.user_id)
+        self.assertIsNotNone(retry_job)
+        assert retry_job is not None
+        self.assertEqual(retry_job["job_type"], "unknown_job_type")
+        self.assertEqual(retry_job["status"], "queued")
+
     def test_sensitive_write_requires_confirmation_and_is_audited(self) -> None:
         orchestrator = self._build_orchestrator()
         with self.assertRaises(PermissionError):

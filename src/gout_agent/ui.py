@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from gout_agent import data
+from gout_agent import data, runtime_taskflow
 from gout_agent.skills.orchestrator import AppOrchestrator
 
 
@@ -383,6 +383,7 @@ def _render_shell_header(page: str) -> None:
         "健康分身": "查看长期模式、部位级影响和你的个人健康分身。",
         "风险概览": "查看当前风险、变化原因和今天最该优先处理的事项。",
         "数据记录": "用最少的输入补充今天的行为、部位变化和用药情况。",
+        "管理计划": "生成未来 7 天或 30 天的管理计划，明确今天该做什么和下一步怎么跟进。",
         "报告中心": "查看周期复盘，并上传化验报告作为补充材料。",
     }
     st.markdown(
@@ -617,6 +618,7 @@ def _render_sidebar_account_settings(project_root: Path, orchestrator: AppOrches
                         st.success("密码已更新。")
 
         with profile_tab:
+            profile_task_flow = None
             gender_keys = list(GENDER_OPTIONS.keys())
             current_gender = context.profile.get("gender") or "unknown"
             gender_index = gender_keys.index(current_gender) if current_gender in gender_keys else 0
@@ -633,7 +635,7 @@ def _render_sidebar_account_settings(project_root: Path, orchestrator: AppOrches
                 if not confirm_profile_update:
                     st.error("更新基础资料前，请先确认本次修改。")
                 else:
-                    orchestrator.update_profile(
+                    write_result = orchestrator.update_profile_with_flow(
                         {
                             "name": name,
                             "gender": gender,
@@ -645,7 +647,10 @@ def _render_sidebar_account_settings(project_root: Path, orchestrator: AppOrches
                         audit_meta={"source": "account_settings", "confirmed": True},
                     )
                     st.session_state["current_display_name"] = name or current_user.get("display_name") or current_user.get("username")
+                    profile_task_flow = write_result.get("task_flow") or {}
                     st.success("基础资料已更新。")
+            if profile_task_flow:
+                _render_task_flow(profile_task_flow, key_prefix="account_profile_flow")
 
         with st.expander("最近敏感操作", expanded=False):
             audit_logs = orchestrator.get_write_audit_logs(limit=8)
@@ -674,7 +679,7 @@ def render_app(project_root: Path) -> None:
         st.header("导航")
         page = st.radio(
             "前往页面",
-            ["健康分身", "风险概览", "数据记录", "报告中心"],
+            ["健康分身", "风险概览", "数据记录", "管理计划", "报告中心"],
         )
         st.divider()
         journal_profile = context.user_journal.get("profile", {})
@@ -695,6 +700,8 @@ def render_app(project_root: Path) -> None:
         _render_risk_hub(orchestrator, context)
     elif page == "数据记录":
         _render_record_hub(orchestrator, context)
+    elif page == "管理计划":
+        _render_care_plan_center(orchestrator, context)
     elif page == "报告中心":
         _render_report_center(orchestrator, context)
 
@@ -706,17 +713,20 @@ def _render_profile_hub(orchestrator: AppOrchestrator, context) -> None:
     st.subheader("健康分身")
     st.caption("这里优先展示你的长期模式、部位变化和个人健康分身。")
     _render_new_user_banner(context)
-    _render_memory_portrait(context, nested=True)
+    twin_task_flow = runtime_taskflow.build_twin_refresh_task_flow(context)
+    _render_task_flow(twin_task_flow, key_prefix="twin_refresh_flow")
+    _render_memory_portrait(context.twin_state or {}, nested=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_risk_hub(orchestrator: AppOrchestrator, context) -> None:
-    snapshot = orchestrator.get_ui_snapshot(context)
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("风险概览")
     st.caption("这里聚焦当前风险、变化原因和今天的管理重点。")
     _render_new_user_banner(context)
-    _render_dashboard(orchestrator, context, snapshot)
+    risk_task_flow = runtime_taskflow.build_risk_refresh_task_flow(context)
+    _render_task_flow(risk_task_flow, key_prefix="risk_overview_flow")
+    _render_dashboard(context)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -741,6 +751,155 @@ def _render_record_hub(orchestrator: AppOrchestrator, context) -> None:
         _render_pain_log(orchestrator, context)
     with tab3:
         _render_medication_management(orchestrator, context, nested=True, compact=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_care_plan_center(orchestrator: AppOrchestrator, context) -> None:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("管理计划")
+    st.caption("这里会结合你的健康分身、当前风险、近期行为和发作历史，生成未来 7 天或 30 天的管理计划。")
+    orchestrator.run_pending_background_jobs(limit=5)
+    background_jobs = orchestrator.list_background_jobs(limit=8)
+    if _is_new_user_context(context):
+        _render_empty_guide(
+            "先记录几天，再生成更有价值的管理计划",
+            "管理计划会根据你的近期行为、重点部位和发作风险生成，所以先完成几天记录后，计划会更贴近你的个人模式。",
+            [
+                "先在“数据记录”里补饮水、饮酒和是否服药",
+                "如果最近有疼痛或发作，再补疼痛记录",
+                "连续记录后再生成 7 天或 30 天计划，建议会更具体",
+            ],
+        )
+
+    left, right = st.columns([1.2, 0.8], gap="large")
+    with left:
+        horizon_days = st.radio(
+            "计划周期",
+            [7, 30],
+            horizontal=True,
+            format_func=lambda value: "未来 7 天" if int(value) == 7 else "未来 30 天",
+            key="care_plan_horizon_days",
+        )
+        plan_type = "7d" if int(horizon_days) == 7 else "30d"
+        if st.button(f"生成 {horizon_days} 天管理计划", key=f"submit_care_plan_{plan_type}", use_container_width=True):
+            orchestrator.submit_background_job("care_plan_generation", {"horizon_days": int(horizon_days)})
+            st.success("管理计划生成任务已加入队列。")
+            st.rerun()
+
+        latest_run = orchestrator.get_latest_care_plan_run(plan_type=plan_type)
+        if latest_run and latest_run.get("status") != "archived":
+            refreshed_run = orchestrator.evaluate_care_plan_run(int(latest_run["id"]))
+            if refreshed_run:
+                latest_run = refreshed_run
+        plan_payload = latest_run.get("plan_payload") if latest_run else {}
+        active_plan_jobs = (
+            background_jobs.loc[background_jobs["job_type"].isin(["care_plan_generation", "care_plan_replan"])].head(3)
+            if not background_jobs.empty
+            else pd.DataFrame()
+        )
+        latest_plan_job = active_plan_jobs.iloc[0].to_dict() if not active_plan_jobs.empty else {}
+        if not active_plan_jobs.empty:
+            chips = "".join(
+                [
+                    f'<span class="bullet-chip">{("30 天" if int((row.get("payload") or {}).get("horizon_days") or 7) >= 30 else "7 天")} · {row.get("status")}</span>'
+                    for _, row in active_plan_jobs.iterrows()
+                ]
+            )
+            st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">计划任务状态</div>{chips}</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            _summary_card(
+                "计划摘要",
+                plan_payload.get("summary") or "点击上方按钮后，系统会在后台生成新一轮管理计划，并在这里更新摘要。",
+            ),
+            unsafe_allow_html=True,
+        )
+        plan_flow = runtime_taskflow.build_background_job_task_flow(latest_plan_job)
+        _render_task_flow(plan_flow, key_prefix=f"care_plan_flow_{plan_type}")
+        progress = plan_payload.get("progress") or {}
+        completion_rate = int(progress.get("completion_rate") or 0)
+        st.progress(min(max(completion_rate, 0), 100) / 100 if progress else 0)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("计划进度", f"{completion_rate}%")
+        m2.metric("已完成步骤", f"{int(progress.get('completed_steps') or 0)}/{int(progress.get('total_steps') or 0)}")
+        m3.metric("当前状态", _format_care_plan_status(plan_payload.get("status") or (latest_run or {}).get("status")))
+
+        phases = plan_payload.get("phases") or []
+        if phases:
+            phase_chips = "".join(
+                [f'<span class="bullet-chip">{phase.get("window")}: {phase.get("title")}</span>' for phase in phases]
+            )
+            st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">阶段推进</div>{phase_chips}</div>', unsafe_allow_html=True)
+
+        goals = plan_payload.get("key_goals") or []
+        actions = plan_payload.get("today_actions") or []
+        st.markdown(_summary_card("未来几天的关键目标", "；".join(goals[:3]) if goals else "暂未生成关键目标。"), unsafe_allow_html=True)
+        st.markdown(_summary_card("今天要做什么", "；".join(actions[:4]) if actions else "暂未生成今天的行动建议。"), unsafe_allow_html=True)
+
+        steps = plan_payload.get("steps") or []
+        if steps and latest_run:
+            st.markdown("**计划步骤**")
+            for step in steps:
+                step_id = str(step.get("id") or "")
+                step_status = str(step.get("status") or "pending")
+                title = str(step.get("title") or "未命名步骤")
+                description = str(step.get("description") or "")
+                status_text = _format_care_plan_step_status(step_status, step.get("completion_source"))
+                st.markdown(
+                    f'<div class="bullet-card"><div class="bullet-card-title">{title}</div><div style="color:#6b5a49;font-size:0.88rem;margin-bottom:0.4rem;">{description}</div><div style="color:#9d5c2f;font-size:0.82rem;font-weight:600;">{status_text}</div></div>',
+                    unsafe_allow_html=True,
+                )
+                checkbox_key = f"care_step_done_{latest_run['id']}_{step_id}"
+                checked = st.checkbox("标记完成", value=step_status == "done", key=checkbox_key)
+                if checked != (step_status == "done"):
+                    orchestrator.update_care_plan_step(int(latest_run["id"]), step_id, done=checked)
+                    st.rerun()
+                if step_status != "failed" and st.button("执行受阻", key=f"care_step_failed_{latest_run['id']}_{step_id}"):
+                    orchestrator.update_care_plan_step(int(latest_run["id"]), step_id, failed=True)
+                    st.rerun()
+
+    with right:
+        st.markdown(
+            _summary_card(
+                "重点观察部位",
+                f"{plan_payload.get('focus_site') or '暂未生成'}"
+                + (f"：{plan_payload.get('focus_site_reason')}" if plan_payload.get("focus_site_reason") else ""),
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            _summary_card(
+                "什么时候复查",
+                plan_payload.get("review_timing") or "生成计划后，这里会给出建议的复查节点。",
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            _summary_card(
+                "之后怎么更新计划",
+                plan_payload.get("update_plan") or "连续执行后，系统会根据新增记录刷新下一轮计划。",
+            ),
+            unsafe_allow_html=True,
+        )
+        replan_reason = str(plan_payload.get("replan_reason") or "").strip()
+        auto_completion_reasons = plan_payload.get("auto_completion_reasons") or []
+        if auto_completion_reasons:
+            st.markdown(
+                _summary_card("系统自动判断已完成", "；".join([str(item) for item in auto_completion_reasons[:4]])),
+                unsafe_allow_html=True,
+            )
+        if replan_reason:
+            st.markdown(_summary_card("需要中途重规划", replan_reason), unsafe_allow_html=True)
+        adjustments = plan_payload.get("failure_adjustments") or []
+        if adjustments:
+            st.markdown(
+                _summary_card("计划受阻后的调整", "；".join([str(item) for item in adjustments[:4]])),
+                unsafe_allow_html=True,
+            )
+        if latest_run and st.button("重新规划本轮计划", key=f"replan_care_plan_{latest_run['id']}", use_container_width=True):
+            orchestrator.replan_care_plan(int(latest_run["id"]))
+            st.success("已提交重规划任务，系统会基于最新状态生成下一轮计划。")
+            st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -786,6 +945,7 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
         if not latest_report_summaries.empty:
             report_payload = latest_report_summaries.iloc[0].get("summary_payload") or {}
         active_report_jobs = background_jobs.loc[background_jobs["job_type"] == "report_generation"].head(3) if not background_jobs.empty else pd.DataFrame()
+        latest_report_job = active_report_jobs.iloc[0].to_dict() if not active_report_jobs.empty else {}
         if not active_report_jobs.empty:
             chips = "".join(
                 [
@@ -794,6 +954,8 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
                 ]
             )
             st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">报告任务状态</div>{chips}</div>', unsafe_allow_html=True)
+            report_flow = runtime_taskflow.build_background_job_task_flow(latest_report_job)
+            _render_task_flow(report_flow, key_prefix=f"report_flow_{report_type}")
 
         st.markdown(
             _summary_card(
@@ -802,6 +964,21 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
             ),
             unsafe_allow_html=True,
         )
+
+        report_job_id = int(latest_report_job["id"]) if latest_report_job else None
+        report_job_status = str(latest_report_job.get("status") or "") if latest_report_job else ""
+        if report_job_id is not None:
+            retry_col, rerun_col = st.columns(2)
+            with retry_col:
+                if report_job_status == "failed" and st.button("重试失败任务", key=f"retry_report_job_{report_job_id}", use_container_width=True):
+                    orchestrator.retry_background_job(report_job_id)
+                    st.success("已重新提交报告生成重试任务。")
+                    st.rerun()
+            with rerun_col:
+                if st.button("重新运行", key=f"rerun_report_job_{report_job_id}", use_container_width=True):
+                    orchestrator.rerun_background_job(report_job_id)
+                    st.success("已重新提交报告生成任务。")
+                    st.rerun()
 
         action_plan = report_payload.get("action_plan") or []
         action_text = "；".join(action_plan[:4]) if action_plan else "暂无明确建议，建议继续保持记录。"
@@ -850,6 +1027,7 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
 
         latest_parse_results = data.get_lab_report_parse_results(orchestrator.project_root, limit=1, user_id=orchestrator.user_id)
         active_lab_jobs = background_jobs.loc[background_jobs["job_type"] == "lab_report_parse"].head(3) if not background_jobs.empty else pd.DataFrame()
+        latest_lab_job = active_lab_jobs.iloc[0].to_dict() if not active_lab_jobs.empty else {}
         if not active_lab_jobs.empty:
             chips = "".join(
                 [
@@ -858,6 +1036,23 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
                 ]
             )
             st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">化验识别任务状态</div>{chips}</div>', unsafe_allow_html=True)
+            lab_flow = runtime_taskflow.build_background_job_task_flow(latest_lab_job)
+            _render_task_flow(lab_flow, key_prefix="lab_flow")
+
+        lab_job_id = int(latest_lab_job["id"]) if latest_lab_job else None
+        lab_job_status = str(latest_lab_job.get("status") or "") if latest_lab_job else ""
+        if lab_job_id is not None:
+            retry_col, rerun_col = st.columns(2)
+            with retry_col:
+                if lab_job_status == "failed" and st.button("重试失败任务", key=f"retry_lab_job_{lab_job_id}", use_container_width=True):
+                    orchestrator.retry_background_job(lab_job_id)
+                    st.success("已重新提交化验识别重试任务。")
+                    st.rerun()
+            with rerun_col:
+                if st.button("重新运行", key=f"rerun_lab_job_{lab_job_id}", use_container_width=True):
+                    orchestrator.rerun_background_job(lab_job_id)
+                    st.success("已重新提交化验识别任务。")
+                    st.rerun()
 
         if latest_parse_results.empty:
             st.markdown(_summary_card("AI 解读", "上传并识别化验报告后，这里会显示结合健康分身、近期行为和历史报告的解读。"), unsafe_allow_html=True)
@@ -873,12 +1068,48 @@ def _render_report_center(orchestrator: AppOrchestrator, context) -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _render_dashboard(orchestrator: AppOrchestrator, context, snapshot: dict) -> None:
-    risk_snapshots = orchestrator.registry.call("获取风险快照", 90)
+def _render_task_flow(task_flow: dict[str, Any], key_prefix: str) -> None:
+    if not task_flow:
+        return
+    title = str(task_flow.get("title") or "任务执行过程")
+    progress = task_flow.get("progress") or {}
+    completion_rate = int(progress.get("completion_rate") or 0)
+    steps = task_flow.get("steps") or []
+    status_text = _format_task_flow_status(task_flow.get("status"))
+    summary = f"{status_text} · {completion_rate}%"
+    with st.expander(f"{title}｜{summary}", expanded=False):
+        st.progress(min(max(completion_rate, 0), 100) / 100 if progress else 0)
+
+        phases = task_flow.get("phases") or []
+        if phases:
+            phase_chips = "".join(
+                [f'<span class="bullet-chip">{phase.get("window")}: {phase.get("title")}</span>' for phase in phases]
+            )
+            st.markdown(
+                f'<div class="bullet-card"><div class="bullet-card-title">任务阶段</div>{phase_chips}</div>',
+                unsafe_allow_html=True,
+            )
+
+        if steps:
+            st.markdown("**步骤进度**")
+            for index, step in enumerate(steps):
+                step_status = _format_care_plan_step_status(step.get("status"))
+                st.markdown(
+                    f'<div class="bullet-card"><div class="bullet-card-title">{index + 1}. {step.get("title")}</div><div style="color:#9d5c2f;font-size:0.82rem;font-weight:600;">{step_status}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+        next_action = str(task_flow.get("next_action") or "").strip()
+        if next_action:
+            st.caption(next_action)
+
+
+def _render_dashboard(context) -> None:
     journal_records = pd.DataFrame(context.user_journal.get("recent_health_records") or [])
     recent_logs = journal_records.tail(7) if not journal_records.empty else context.logs.tail(7)
     recent_site_history = context.site_history.head(7) if not context.site_history.empty else pd.DataFrame()
-    risk_overview = context.risk_overview or {}
+    twin_state = context.twin_state or {}
+    risk_overview = twin_state.get("risk_view") or {}
     is_new_user = _is_new_user_context(context)
 
     if is_new_user:
@@ -893,17 +1124,17 @@ def _render_dashboard(orchestrator: AppOrchestrator, context, snapshot: dict) ->
         )
         return
 
-    st.metric("当前风险", risk_overview.get("attack_risk_label") or snapshot["attack_risk_label"])
+    st.metric("当前风险", risk_overview.get("attack_risk_label") or "未知")
 
     st.subheader("变化原因")
     st.markdown(
         _summary_card(
             "为什么会这样",
-            _summarize_risk_change(risk_snapshots if not risk_snapshots.empty else pd.DataFrame(), recent_logs, recent_site_history),
+            _summarize_risk_change_from_twin(context, recent_logs, recent_site_history),
         ),
         unsafe_allow_html=True,
     )
-    trigger_summary = risk_overview.get("trigger_summary") or snapshot["trigger_summary"]
+    trigger_summary = risk_overview.get("trigger_summary") or []
     if trigger_summary:
         factor_chips = "".join([f'<span class="bullet-chip">{item.get("label")} · {item.get("count")}次</span>' for item in trigger_summary[:5]])
         st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">最近最常出现的风险因素</div>{factor_chips}</div>', unsafe_allow_html=True)
@@ -916,17 +1147,17 @@ def _render_dashboard(orchestrator: AppOrchestrator, context, snapshot: dict) ->
             "今天优先做什么",
             "；".join(
                 [
-                    f"饮水：{risk_overview.get('hydration_advice') or snapshot['hydration_advice']}",
-                    f"饮食：{risk_overview.get('diet_advice') or snapshot['diet_advice']}",
-                    f"运动：{risk_overview.get('exercise_advice') or snapshot['exercise_advice']}",
-                    f"目标：{risk_overview.get('behavior_goal') or snapshot['behavior_goal']}",
+                    f"饮水：{risk_overview.get('hydration_advice') or '保持规律饮水'}",
+                    f"饮食：{risk_overview.get('diet_advice') or '注意规避高风险饮食'}",
+                    f"运动：{risk_overview.get('exercise_advice') or '保持温和活动'}",
+                    f"目标：{risk_overview.get('behavior_goal') or '继续稳定记录与观察'}",
                 ]
             ),
         ),
         unsafe_allow_html=True,
     )
 
-    abnormal_items = risk_overview.get("abnormal_items") or snapshot["abnormal_items"]
+    abnormal_items = risk_overview.get("abnormal_items") or []
     if abnormal_items:
         chips = "".join([f'<span class="bullet-chip">{item}</span>' for item in abnormal_items[:4]])
         st.markdown(f'<div class="bullet-card"><div class="bullet-card-title">需要关注</div>{chips}</div>', unsafe_allow_html=True)
@@ -937,6 +1168,7 @@ def _render_daily_log(orchestrator: AppOrchestrator, context, nested: bool = Fal
     if not nested:
         st.subheader("日常行为")
         st.caption("记录今天最常用的行为与状态信息。")
+    task_flow = None
     with st.form("daily_health_form"):
         log_date = st.date_input("日期", value=date.today())
         water_ml = st.number_input("饮水量 (mL)", min_value=0, max_value=6000, value=2000 if compact else 1800, step=100)
@@ -954,7 +1186,7 @@ def _render_daily_log(orchestrator: AppOrchestrator, context, nested: bool = Fal
             free_text = st.text_area("补充说明（选填）", placeholder="今天还有什么想补充的？")
         submitted = st.form_submit_button("保存日常记录")
     if submitted:
-        orchestrator.save_daily_log(
+        write_result = orchestrator.save_daily_log_with_flow(
             {
                 "log_date": str(log_date),
                 "water_ml": water_ml,
@@ -967,7 +1199,10 @@ def _render_daily_log(orchestrator: AppOrchestrator, context, nested: bool = Fal
                 "free_text": free_text,
             }
         )
+        task_flow = write_result.get("task_flow") or {}
         st.success("已保存今天的日常记录。")
+    if task_flow:
+        _render_task_flow(task_flow, key_prefix="daily_log_flow")
 
 
 def _render_site_and_attack_log(orchestrator: AppOrchestrator, context, nested: bool = False, compact: bool = False) -> None:
@@ -1068,6 +1303,7 @@ def _render_pain_log(orchestrator: AppOrchestrator, context) -> None:
     st.caption("用一句话描述今天的不适，系统会自动解析部位、疼痛程度和是否属于一次发作。")
     if _is_new_user_context(context):
         st.info("例如：今天右脚大脚趾疼 6 分，有点红肿，像一次发作。")
+    task_flow = None
 
     with st.form("pain_text_form", clear_on_submit=True):
         record_date = st.date_input("记录日期", value=date.today(), key="pain_text_date")
@@ -1085,16 +1321,24 @@ def _render_pain_log(orchestrator: AppOrchestrator, context) -> None:
         else:
             symptom_payload = dict(candidate["symptom_payload"])
             symptom_payload["log_date"] = str(record_date)
-            orchestrator.save_joint_symptom(symptom_payload)
+            symptom_result = orchestrator.save_joint_symptom_with_flow(symptom_payload)
 
             if candidate.get("attack_payload"):
                 attack_payload = dict(candidate["attack_payload"])
                 attack_payload["attack_date"] = str(record_date)
-                orchestrator.save_attack(attack_payload)
+                attack_result = orchestrator.save_attack_with_flow(attack_payload)
+                task_flow = runtime_taskflow.merge_task_flows(
+                    "疼痛与发作记录任务",
+                    [symptom_result.get("task_flow") or {}, attack_result.get("task_flow") or {}],
+                    next_action=runtime_taskflow.build_context_next_action(attack_result.get("context")),
+                )
                 st.success("已根据描述自动写入疼痛记录和发作记录。")
             else:
+                task_flow = symptom_result.get("task_flow") or {}
                 st.success("已根据描述自动写入疼痛记录。")
             st.caption(candidate.get("summary") or "系统已完成解析并写入。")
+    if task_flow:
+        _render_task_flow(task_flow, key_prefix="pain_log_flow")
 
 
 def _render_profile_management(orchestrator: AppOrchestrator, context) -> None:
@@ -1165,6 +1409,8 @@ def _render_medication_management(orchestrator: AppOrchestrator, context, nested
         st.subheader("服药记录")
         st.caption("先记录今天有没有按时服药；如还没有药物方案，再补充最基本的信息。")
     left, right = st.columns(2, gap="large")
+    add_task_flow = None
+    log_task_flow = None
 
     with left:
         with st.expander("如需补充药物方案", expanded=False):
@@ -1189,7 +1435,7 @@ def _render_medication_management(orchestrator: AppOrchestrator, context, nested
                 if not confirm_medication_add:
                     st.error("新增药物方案前，请先确认本次写入。")
                 else:
-                    orchestrator.add_medication(
+                    write_result = orchestrator.add_medication_with_flow(
                         {
                             "medication_name": medication_name,
                             "dose": dose,
@@ -1201,6 +1447,7 @@ def _render_medication_management(orchestrator: AppOrchestrator, context, nested
                         },
                         audit_meta={"source": "medication_form", "confirmed": True},
                     )
+                    add_task_flow = write_result.get("task_flow") or {}
                     st.success("药物已添加，请刷新或切换页面查看最新结果。")
 
     with right:
@@ -1220,7 +1467,8 @@ def _render_medication_management(orchestrator: AppOrchestrator, context, nested
             status = st.selectbox("服药状态", status_keys, format_func=lambda x: STATUS_OPTIONS.get(x, x)) if medication_choices else None
             if medication_choices and st.button("保存服药状态"):
                 taken_time = datetime.now().replace(microsecond=0).isoformat(sep=" ") if status == "taken" else None
-                orchestrator.log_medication_taken(medication_choices[selected_label], status, taken_time)
+                write_result = orchestrator.log_medication_taken_with_flow(medication_choices[selected_label], status, taken_time)
+                log_task_flow = write_result.get("task_flow") or {}
                 st.success("服药状态已保存，请刷新或切换页面查看最新结果。")
 
         adherence = orchestrator.registry.call("获取服药依从性", 30)
@@ -1231,19 +1479,34 @@ def _render_medication_management(orchestrator: AppOrchestrator, context, nested
             adherence_view.columns = ["药物名称", "状态", "服药时间", "记录时间"]
             st.dataframe(adherence_view, use_container_width=True, hide_index=True)
 
+    if add_task_flow:
+        _render_task_flow(add_task_flow, key_prefix="medication_add_flow")
+    if log_task_flow:
+        _render_task_flow(log_task_flow, key_prefix="medication_log_flow")
+
 
 def _run_assistant_question(orchestrator: AppOrchestrator, context, question: str) -> None:
     cleaned = (question or "").strip()
     if not cleaned:
         return
     st.session_state["assistant_last_question"] = cleaned
-    st.session_state["assistant_last_result"] = orchestrator.answer_coach_question(cleaned, context)
+    st.session_state["assistant_writeback_flow"] = None
+    result = orchestrator.answer_coach_question(cleaned, context)
+    st.session_state["assistant_last_result"] = result
+    st.session_state["assistant_analysis_flow"] = runtime_taskflow.build_analysis_task_flow(
+        str(result.get("skill") or "unknown"),
+        source=str(result.get("source") or ""),
+        next_action=runtime_taskflow.build_context_next_action(context),
+        title="问答分析任务",
+    )
 
 
 def _render_global_assistant(orchestrator: AppOrchestrator, context) -> None:
     st.session_state.setdefault("assistant_last_question", "")
     st.session_state.setdefault("assistant_last_result", None)
     st.session_state.setdefault("assistant_writeback_notice", "")
+    st.session_state.setdefault("assistant_writeback_flow", None)
+    st.session_state.setdefault("assistant_analysis_flow", None)
 
     st.markdown(
         """
@@ -1297,6 +1560,9 @@ def _render_assistant_panel(orchestrator: AppOrchestrator, context) -> None:
         else:
             st.warning(last_result["error"] or "本地模型暂时不可用，系统已自动切换为规则引擎回答。")
         st.caption(f"当前处理技能：{last_result['skill']}")
+        analysis_flow = st.session_state.get("assistant_analysis_flow") or {}
+        if analysis_flow:
+            _render_task_flow(analysis_flow, key_prefix="assistant_analysis_flow")
         st.markdown("**分析结果**")
         st.write(last_result["answer"])
         _render_assistant_writeback(orchestrator, context, st.session_state.get("assistant_last_question") or "")
@@ -1304,6 +1570,9 @@ def _render_assistant_panel(orchestrator: AppOrchestrator, context) -> None:
 
 def _render_assistant_writeback(orchestrator: AppOrchestrator, context, question: str) -> None:
     candidate = _build_assistant_writeback_candidate(orchestrator, context, question)
+    last_flow = st.session_state.get("assistant_writeback_flow") or {}
+    if last_flow:
+        _render_task_flow(last_flow, key_prefix="assistant_writeback_flow")
     if not candidate:
         return
 
@@ -1323,33 +1592,40 @@ def _render_assistant_writeback(orchestrator: AppOrchestrator, context, question
         button_label = "记录已服药" if candidate["status"] == "taken" else "记录漏服"
         if st.button(button_label, key="assistant_writeback_medication_button", use_container_width=True):
             taken_time = datetime.now().replace(microsecond=0).isoformat(sep=" ") if candidate["status"] == "taken" else None
-            orchestrator.log_medication_taken(options[selected], candidate["status"], taken_time)
+            write_result = orchestrator.log_medication_taken_with_flow(options[selected], candidate["status"], taken_time)
             st.session_state["assistant_writeback_notice"] = _build_assistant_after_writeback_message(
                 orchestrator,
                 action_type="medication",
                 medication_status=candidate["status"],
             )
+            st.session_state["assistant_writeback_flow"] = write_result.get("task_flow") or {}
             st.rerun()
         return
 
     st.caption(candidate["summary"])
     action_cols = st.columns(2 if candidate.get("attack_payload") else 1)
     if action_cols[0].button("写入部位症状", key="assistant_writeback_symptom", use_container_width=True):
-        orchestrator.save_joint_symptom(candidate["symptom_payload"])
+        write_result = orchestrator.save_joint_symptom_with_flow(candidate["symptom_payload"])
         st.session_state["assistant_writeback_notice"] = _build_assistant_after_writeback_message(
             orchestrator,
             action_type="symptom",
             body_site=candidate["symptom_payload"].get("body_site"),
         )
+        st.session_state["assistant_writeback_flow"] = write_result.get("task_flow") or {}
         st.rerun()
     if candidate.get("attack_payload") and len(action_cols) > 1:
         if action_cols[1].button("写入为发作记录", key="assistant_writeback_attack", use_container_width=True):
-            orchestrator.save_joint_symptom(candidate["symptom_payload"])
-            orchestrator.save_attack(candidate["attack_payload"])
+            symptom_result = orchestrator.save_joint_symptom_with_flow(candidate["symptom_payload"])
+            attack_result = orchestrator.save_attack_with_flow(candidate["attack_payload"])
             st.session_state["assistant_writeback_notice"] = _build_assistant_after_writeback_message(
                 orchestrator,
                 action_type="attack",
                 body_site=candidate["attack_payload"].get("joint_site"),
+            )
+            st.session_state["assistant_writeback_flow"] = runtime_taskflow.merge_task_flows(
+                "疼痛与发作记录任务",
+                [symptom_result.get("task_flow") or {}, attack_result.get("task_flow") or {}],
+                next_action=runtime_taskflow.build_context_next_action(attack_result.get("context")),
             )
             st.rerun()
 
@@ -1548,16 +1824,15 @@ def _render_report_preview(report: dict) -> None:
         st.json(report)
 
 
-def _render_memory_portrait(context, nested: bool = False) -> None:
+def _render_memory_portrait(memory_payload, nested: bool = False) -> None:
     if not nested:
         st.subheader("健康分身")
         st.caption("这里展示你的部位变化、近期行为和个人痛风模式。")
 
-    memory_payload = context.twin_state or {}
     portraits = memory_payload.get("behavior_portraits") or {}
     twin_profile = memory_payload.get("digital_twin_profile") or {}
     site_pain_patterns = twin_profile.get("site_pain_patterns") or {}
-    is_new_user = _is_new_user_context(context)
+    is_new_user = not bool(twin_profile.get("summary") or site_pain_patterns or portraits)
 
     st.markdown("**个人健康分身**")
     if is_new_user:
@@ -1667,6 +1942,82 @@ def _summary_card(title: str, body: str) -> str:
     """
 
 
+def _summarize_risk_change_from_twin(context, recent_logs: pd.DataFrame, recent_site_history: pd.DataFrame) -> str:
+    change_text = "当前数据量还不够，建议先连续记录几天观察变化。"
+    reasons: list[str] = []
+    twin_state = context.twin_state or {}
+    risk_anchor = twin_state.get("risk_anchor") or {}
+    risk_view = twin_state.get("risk_view") or {}
+    current_score = risk_anchor.get("overall_risk_score")
+    current_label = risk_anchor.get("attack_risk_label")
+    if current_score is not None:
+        change_text = f"当前综合风险评分约 {current_score}，发作风险为{current_label or '未知'}。"
+
+    water_avg = _mean_numeric(recent_logs, "water_ml")
+    if water_avg is not None and water_avg < 1800:
+        reasons.append("近 7 天饮水仍然偏低")
+    if not recent_logs.empty and "alcohol_intake" in recent_logs.columns:
+        alcohol_days = int((recent_logs["alcohol_intake"].fillna("").astype(str).str.lower() != "none").sum())
+        if alcohol_days:
+            reasons.append(f"近 7 天记录到 {alcohol_days} 天饮酒")
+    pain_avg = _mean_numeric(recent_logs, "pain_score")
+    if pain_avg is not None and pain_avg > 0:
+        reasons.append(f"近期平均疼痛约 {pain_avg:.1f}/10")
+    if not recent_site_history.empty:
+        attack_count = int((recent_site_history["event_type"].astype(str) == "attack").sum())
+        if attack_count:
+            reasons.append(f"近期有 {attack_count} 次明确发作记录")
+    trigger_summary = list(risk_view.get("trigger_summary") or [])
+    if trigger_summary:
+        labels = [str(item.get("label")) for item in trigger_summary[:2] if str(item.get("label") or "").strip()]
+        if labels:
+            reasons.append(f"最近风险因素主要是 {'、'.join(labels)}")
+
+    if reasons:
+        return f"{change_text} 主要与{'、'.join(reasons[:3])}有关。"
+    return change_text
+
+
+def _format_care_plan_status(status: str | None) -> str:
+    mapping = {
+        "active": "进行中",
+        "completed": "已完成",
+        "needs_replan": "需要重规划",
+        "needs_adjustment": "执行受阻",
+        "archived": "已归档",
+    }
+    return mapping.get(str(status or "").strip(), "未开始")
+
+
+def _format_task_flow_status(status: str | None) -> str:
+    mapping = {
+        "queued": "排队中",
+        "running": "处理中",
+        "completed": "已完成",
+        "failed": "失败",
+        "active": "进行中",
+        "needs_replan": "需要重规划",
+        "needs_adjustment": "执行受阻",
+        "archived": "已归档",
+    }
+    return mapping.get(str(status or "").strip(), "未开始")
+
+
+def _format_care_plan_step_status(status: str | None, completion_source: str | None = None) -> str:
+    mapping = {
+        "pending": "待完成",
+        "in_progress": "进行中",
+        "done": "已完成",
+        "failed": "执行受阻",
+    }
+    label = mapping.get(str(status or "").strip(), "待完成")
+    if str(status or "").strip() == "done" and str(completion_source or "").strip() == "auto":
+        return f"{label} · 系统自动判断"
+    if str(status or "").strip() == "done" and str(completion_source or "").strip() == "manual":
+        return f"{label} · 手动勾选"
+    return label
+
+
 def _is_new_user_context(context) -> bool:
     has_logs = not context.logs.empty
     has_symptoms = not context.symptom_logs.empty
@@ -1676,7 +2027,7 @@ def _is_new_user_context(context) -> bool:
     return not any([has_logs, has_symptoms, has_attacks, has_twin])
 
 
-def _summarize_risk_change(risk_snapshots: pd.DataFrame, recent_logs: pd.DataFrame, recent_site_history: pd.DataFrame) -> str:
+def _summarize_risk_change(context, recent_logs: pd.DataFrame, recent_site_history: pd.DataFrame) -> str:
     change_text = "当前数据量还不够，建议先连续记录几天观察变化。"
     reasons: list[str] = []
 
@@ -1718,6 +2069,7 @@ def _render_profile_form(orchestrator: AppOrchestrator, context, form_key: str) 
     gender_keys = list(GENDER_OPTIONS.keys())
     current_gender = context.profile.get("gender") or "unknown"
     gender_index = gender_keys.index(current_gender) if current_gender in gender_keys else 0
+    task_flow = None
     with st.form(form_key):
         name = st.text_input("姓名", value=context.profile.get("name") or "Demo User")
         gender = st.selectbox("性别", gender_keys, index=gender_index, format_func=lambda x: GENDER_OPTIONS.get(x, x))
@@ -1738,7 +2090,7 @@ def _render_profile_form(orchestrator: AppOrchestrator, context, form_key: str) 
         if not confirm_profile_update:
             st.error("更新基础资料前，请先确认本次修改。")
         else:
-            orchestrator.update_profile(
+            write_result = orchestrator.update_profile_with_flow(
                 {
                     "name": name,
                     "gender": gender,
@@ -1756,7 +2108,10 @@ def _render_profile_form(orchestrator: AppOrchestrator, context, form_key: str) 
                 },
                 audit_meta={"source": "profile_form", "confirmed": True},
             )
+            task_flow = write_result.get("task_flow") or {}
             st.success("基础资料已更新，请刷新或切换页面查看最新结果。")
+    if task_flow:
+        _render_task_flow(task_flow, key_prefix=f"{form_key}_flow")
 
 
 def _mean_numeric(frame: pd.DataFrame, column: str) -> float | None:
